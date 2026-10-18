@@ -1,0 +1,51 @@
+{
+ "version": 8,
+ "created": "2026-10-15",
+ "note": "optimize.py: model kept; confidence calibration changed",
+ "lev": [
+  [
+   5,
+   0.14
+  ],
+  [
+   10,
+   0.3
+  ],
+  [
+   25,
+   0.26
+  ],
+  [
+   50,
+   0.18
+  ],
+  [
+   100,
+   0.12
+  ]
+ ],
+ "mm": 0.004,
+ "decay": 0.985,
+ "bin_pct": 0.0025,
+ "range": 0.15,
+ "smooth": 3,
+ "min_dist": 0.002,
+ "max_dist": 0.1,
+ "ls_weight": 0.6,
+ "candle_tilt": 0.08,
+ "opp_min_rel": 0.15,
+ "third_min_ratio": 0.5,
+ "next_min_ratio": 0.4,
+ "conf": {
+  "m4_agree": 0,
+  "m4_disagree": -0.15,
+  "m1_agree": 0.1,
+  "m1_disagree": 0,
+  "funding": 0,
+  "funding_min": 2e-06,
+  "strong": 0.7017,
+  "moderate": 0.5165
+ },
+ "invalidation_mult": 1.5,
+ "horizon_h": 24
+}
