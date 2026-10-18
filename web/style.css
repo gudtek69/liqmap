@@ -1,0 +1,33 @@
+:root{--bg:#07090d;--panel:#0e1219;--line:#1c2330;--txt:#d7dde8;--mut:#7d8798;--up:#26d07c;--dn:#ff4d5e;--acc:#ffd23f}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#121a2a,var(--bg));color:var(--txt);font:13px/1.45 Inter,system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;align-items:center;gap:18px;padding:14px 22px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}h1 b{color:var(--acc)}
+.pill{padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--mut);font-size:11.5px}
+.stat{display:flex;flex-direction:column}.stat span{color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.6px}.stat b{font-size:15px;font-variant-numeric:tabular-nums}
+.grow{flex:1}nav{display:flex;gap:6px;padding:12px 22px 0;flex-wrap:wrap}nav button{background:#0e1219;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:7px 12px;font:600 12.5px system-ui;cursor:pointer;display:flex;gap:8px;align-items:center}
+nav button.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}nav button i{font-style:normal;font-weight:900}
+.ov{margin:12px 22px 0;padding:6px 12px}.ov table td,.ov table th{padding:6px 8px;text-align:left}.ov th{color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;font-weight:600}
+.ov tr.r{cursor:pointer}.ov tr.r:hover{background:#141b27}.ov tr.on{background:#17140a}.ov td.u{color:var(--up)}.ov td.d{color:var(--dn)}
+main{display:grid;grid-template-columns:1fr 330px;gap:14px;padding:14px 22px}
+.card{background:linear-gradient(180deg,#0f141c,#0b0f15);border:1px solid var(--line);border-radius:12px;padding:12px}
+canvas{width:100%;height:640px;display:block}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--mut);margin:2px 0 10px}
+.path{font-size:20px;font-weight:700;color:var(--acc);margin-bottom:10px;font-variant-numeric:tabular-nums}
+.t{display:grid;grid-template-columns:22px 1fr 70px;gap:8px;align-items:center;margin:7px 0}
+.n{width:22px;height:22px;border-radius:50%;background:var(--acc);color:#000;font-weight:800;display:grid;place-items:center;font-size:12px}
+.bar{height:6px;border-radius:3px;background:#1a2130;overflow:hidden;margin-top:4px}.bar i{display:block;height:100%;background:linear-gradient(90deg,#7a3cff,#ffd23f)}
+.small{color:var(--mut);font-size:11.5px}.warn{margin-top:14px;padding:10px;border:1px solid #4a3a12;background:#1a1508;border-radius:8px;color:#e9c46a;font-size:11.5px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td{padding:3px 0;border-bottom:1px solid #141a24}td:last-child{text-align:right}
+.ok{color:var(--up)}.bad{color:var(--dn)}
+.banner{margin:14px 22px 0;display:flex;align-items:center;gap:18px;padding:14px 20px;border-radius:12px;border:1px solid var(--line);background:#0e1219}
+.banner.up{border-color:#1f6b45;background:linear-gradient(90deg,rgba(38,208,124,.16),#0e1219 70%)}.banner.dn{border-color:#7a2530;background:linear-gradient(90deg,rgba(255,77,94,.16),#0e1219 70%)}
+.arrow{font-size:54px;line-height:1;font-weight:900}.up .arrow,.up .call b{color:var(--up)}.dn .arrow,.dn .call b{color:var(--dn)}
+.call{font-size:21px;font-weight:700}.sub{color:var(--mut);margin-top:4px;font-size:12.5px}.sub b{color:var(--txt)}
+.conf{padding:4px 11px;border-radius:999px;font-weight:800;font-size:12px;letter-spacing:.8px;text-transform:uppercase;border:1px solid}
+.conf.strong{color:#ffd23f;border-color:#ffd23f}.conf.moderate{color:#9ecbff;border-color:#4a6b94}.conf.weak{color:var(--mut);border-color:var(--line)}
+.hit{text-align:right;font-size:12px;color:var(--mut)}.hit b{color:var(--acc)}
+@media(max-width:1000px){main{grid-template-columns:1fr}}
+/* utility classes (replace former inline style="" attributes so CSP can forbid inline styles) */
+.ar{text-align:right}.mt6{margin-top:6px}.mt8{margin-top:8px}.mt16{margin-top:16px}.cal-h{margin:8px 0 4px}
+.amber{color:#e9c46a}.mut{color:var(--mut)}.tiny{font-size:11px}
+.conf.sm{font-size:10px;padding:1px 7px}.conf.sm2{font-size:10px;padding:2px 8px}
