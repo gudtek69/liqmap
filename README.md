@@ -6,11 +6,11 @@ A small, dependency-free toy that estimates where leveraged positions on crypto 
 
 ## What it does
 
-- **Map page** (`web/index.html`): a single static HTML file. For each coin it shows hourly candles, an estimated liquidation-density heatmap within ±15% of spot, the largest clusters, a predicted path (e.g. `68.2K → 69.5K → 66.9K`), a call banner with a confidence grade (strong / moderate / weak), and the backtest and live hit rates from `stats.json`.
-- **Data fetcher and local server** (`web/fetcher.py`): every 60 s it pulls public market data and writes `web/data.json`, then serves the `web/` folder at `http://127.0.0.1:8787`. If `data.json` is missing or stale, the page falls back to calling Hyperliquid directly from the browser (no OKX data in that mode).
+- **Map page** (`web/index.html` + `web/app.js` + `web/style.css`): static files, no build step. For each coin it shows hourly candles, an estimated liquidation-density heatmap within ±15% of spot, the largest clusters, a predicted path (e.g. `68.2K → 69.5K → 66.9K`), a call banner with a confidence grade (strong / moderate / weak), and the backtest and live hit rates from `stats.json`.
+- **Data fetcher and local server** (`web/fetcher.py`): every 60 s it pulls public market data and writes `web/data.json`, then serves the map page (a fixed whitelist of files from `web/`) at `http://127.0.0.1:8787`, on this machine only. If `data.json` is missing or stale, the page falls back to calling Hyperliquid directly from the browser (no OKX data in that mode).
 - **Tracker / grader** (`tracker/tracker.py`): every 5 min it computes each coin's call with the same model and params as the page. It logs a call to SQLite when the call changes (or hourly) and resolves open calls on 5-minute candles. It then writes `stats.json` with hit rate, expectancy (R), time-to-hit, and drawdown, both overall and by confidence.
 - **Optimizer** (`tracker/optimize.py`): runs a walk-forward backtest over ~30 days of hourly data and a conservative random search over model parameters. It splits the data into train (older 2/3) and validation (newer 1/3). A new parameter set is adopted only if validation expectancy improves by ≥ 0.05R with ≥ 80 validation calls and the hit rate doesn't drop. Confidence thresholds are recalibrated and kept only if "strong" beats "weak" on validation. Each adoption bumps `params.json` to a new version (the shipped file is **v8**) and saves a copy in `tracker/params_history/`.
-- **Model** (`tracker/liqmodel.py`): a line-for-line Python port of `model()` / `call()` in `index.html`. Both read the same `params.json`. **Keep the two in sync** if you change one.
+- **Model** (`tracker/liqmodel.py`): a line-for-line Python port of `model()` / `call()` in `web/app.js`. Both read the same `params.json`. **Keep the two in sync** if you change one.
 
 ## How the model works
 
@@ -58,7 +58,7 @@ python3 tracker/tracker.py --stats   # only rebuild stats.json
 python3 tracker/optimize.py          # backtest + parameter search (a few minutes; uses multiprocessing)
 ```
 
-Opening `web/index.html` straight from disk also works, using the browser-only Hyperliquid fallback. For the full model with OKX OI and L/S data, use the fetcher.
+Opening `web/index.html` straight from disk may work in some browsers (browser-only Hyperliquid fallback), but the strict Content-Security-Policy is designed for the local server, so use the fetcher. It also gives you the full model with OKX OI and L/S data.
 
 ## Configuration
 
@@ -67,7 +67,8 @@ Everything is set with environment variables (see `.env.example`). None of them 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LIQMAP_COINS` | `BTC,ETH,SOL` | Coins to fetch / track. Each needs a Hyperliquid perp and an OKX `<COIN>-USDT-SWAP` contract. |
-| `LIQMAP_HOST` / `LIQMAP_PORT` | `127.0.0.1` / `8787` | Local web server bind address |
+| `LIQMAP_HOST` / `LIQMAP_PORT` | `127.0.0.1` / `8787` | Local web server bind address. Keep `127.0.0.1`. Setting another address (e.g. `0.0.0.0`) exposes the server to your network, which is **risky and not recommended**. |
+| `LIQMAP_ALLOWED_HOSTS` | (empty) | Extra `Host` header values the server accepts (DNS-rebinding guard). Only needed if you change `LIQMAP_HOST`. |
 | `LIQMAP_REFRESH` | `60` | Seconds between data fetches |
 | `LIQMAP_WEB` | `./web` | Where the tracker copies `stats.json` / `params.json` for the page |
 | `LIQMAP_TRACKER` | `./tracker` | Fallback folder the server reads `stats.json` / `params.json` from |
@@ -79,7 +80,9 @@ Model parameters live in `tracker/params.json`: leverage tiers, decay, bin size,
 ## Files
 
 ```
-web/index.html        map page (model + chart + track record), no build step
+web/index.html        map page markup (strict CSP, no inline script/style)
+web/app.js            page logic: model + chart + track record, no build step
+web/style.css         page styles
 web/fetcher.py        public-data fetcher + tiny static server
 tracker/liqdata.py    Hyperliquid / OKX public API helpers
 tracker/liqmodel.py   Python port of the page's model + call + resolve logic
@@ -87,6 +90,7 @@ tracker/tracker.py    live call logger / grader -> data/tracker.db, stats.json
 tracker/optimize.py   walk-forward backtest + conservative param search -> params.json, data/backtest.json
 tracker/params.json   current model parameters (v8)
 start.sh              start tracker + fetcher in the background
+SECURITY.md           how to report a vulnerability privately
 ```
 
 ## Limitations
@@ -95,6 +99,16 @@ start.sh              start tracker + fetcher in the background
 - Liquidation levels are **inferred**, not observed. Nobody publishes real per-position liquidation prices.
 - Browser-side "last target hit" tracking uses `localStorage` and only knows what that browser has seen.
 - Read-only: there is no trading code here, and none should be added to it without serious risk controls.
+
+## Safety
+
+- **Local only.** The server binds to `127.0.0.1` by default, so only your own machine can reach it. It serves a fixed whitelist of files and sends strict security headers (CSP, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`).
+- **No keys, no logins, no wallets.** Every data source is a free public endpoint. Nothing here needs an API key, an exchange account, or a wallet.
+- **Never enter a private key or seed phrase** into this tool, its config, or any issue or chat about it. Anyone asking you to is scamming you.
+- **Read-only.** There is no trading code. Only use copies of this project from the official repository.
+- **Not financial advice.** It's a research toy, and its hit rate is about what you'd get by chance (see above).
+
+Found a security problem? See [SECURITY.md](SECURITY.md). Please report it privately, not in a public issue.
 
 ## License
 
