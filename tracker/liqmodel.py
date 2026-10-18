@@ -3,7 +3,7 @@ Both read the same params.json. Keep the two in sync."""
 import math, json, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 def load_params(path=None):
-    return json.load(open(path or os.path.join(HERE, "params.json")))
+    with open(path or os.path.join(HERE, "params.json")) as f: return json.load(f)
 def nice(x):
     e = 10 ** math.floor(math.log10(x)); m = x / e
     return e * (1 if m < 1.5 else 2 if m < 2.25 else 2.5 if m < 3.5 else 5 if m < 7.5 else 10)

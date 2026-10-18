@@ -19,7 +19,10 @@ def cycle():
     for coin in liqdata.COINS:
         try:
             C = liqdata.candles(coin, now - 100 * H); oi = liqdata.okx_series(coin, "oi", 100); ls = liqdata.okx_series(coin, "ls", 100)
-            x = ctx[coin]; spot = x["mark"]; last = oi[-1][1]; scale = (x["oi"] * spot + last) / last
+            if coin not in ctx or not C or not oi: raise ValueError("missing market data")
+            x = ctx[coin]; spot = x["mark"]; last = oi[-1][1]
+            if spot <= 0 or last <= 0: raise ValueError("non-positive price or OI")
+            scale = (x["oi"] * spot + last) / last
             M = liqmodel.model(C, oi, ls, spot, P, scale); r = liqmodel.call(C, M, x["funding"], P)
             prev = con.execute("SELECT ts,dir,target FROM calls WHERE coin=? ORDER BY ts DESC LIMIT 1", (coin,)).fetchone()
             if r:
@@ -51,7 +54,12 @@ def live_summary(rows):
     return s
 def write_stats():
     P = liqmodel.load_params(); con = db()
-    bt = json.load(open(f"{DATA}/backtest.json")) if os.path.exists(f"{DATA}/backtest.json") else None
+    bt = None
+    if os.path.exists(f"{DATA}/backtest.json"):
+        try:
+            with open(f"{DATA}/backtest.json") as f: bt = json.load(f)
+            if not isinstance(bt, dict): bt = None
+        except (OSError, ValueError): bt = None
     st = {"ts": int(time.time() * 1000), "params_version": P["version"], "params_created": P.get("created"), "params_note": P.get("note"),
           "backtest": None, "live": {}, "coins": {}}
     q = "SELECT outcome,tth_h,mae_pct,r,conf FROM calls WHERE outcome IS NOT NULL"
@@ -60,11 +68,12 @@ def write_stats():
     for c in liqdata.COINS:
         st["coins"][c] = {"live": live_summary(con.execute(q + " AND coin=?", (c,)).fetchall()),
                           "backtest": (bt or {}).get("per_coin", {}).get(c, {}).get("all")}
-    if bt: st["backtest"] = {k: bt[k] for k in ("ts", "params_version", "hist_hours", "step_h", "decision", "calibration", "changed", "overall", "random_baseline_note")}
+    if bt: st["backtest"] = {k: bt.get(k) for k in ("ts", "params_version", "hist_hours", "step_h", "decision", "calibration", "changed", "overall", "random_baseline_note")}
     con.close()
     os.makedirs(WEB, exist_ok=True)
     for dst in (f"{DATA}/stats.json", f"{WEB}/stats.json"):
-        json.dump(st, open(dst + ".tmp", "w"), indent=1); os.replace(dst + ".tmp", dst)
+        with open(dst + ".tmp", "w") as f: json.dump(st, f, indent=1)
+        os.replace(dst + ".tmp", dst)
     shutil.copyfile(f"{HERE}/params.json", f"{WEB}/params.json")
 if __name__ == "__main__":
     if "--stats" in sys.argv: write_stats(); sys.exit()
