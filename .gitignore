@@ -1,0 +1,34 @@
+# secrets / local config
+.env
+.env.*
+!.env.example
+
+# runtime data
+data/
+tracker/data/
+web/data.json
+web/data.json.tmp
+web/stats.json
+web/params.json
+*.db
+*.sqlite
+*.csv
+backtest.json
+stats.json
+!tracker/params.json
+tracker/params_history/
+hist/
+
+# logs
+logs/
+*.log
+*.nohup
+*.pid
+
+# python / os
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+node_modules/
