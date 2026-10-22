@@ -29,5 +29,5 @@ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td{p
 @media(max-width:1000px){main{grid-template-columns:1fr}}
 /* utility classes (replace former inline style="" attributes so CSP can forbid inline styles) */
 .ar{text-align:right}.mt6{margin-top:6px}.mt8{margin-top:8px}.mt16{margin-top:16px}.cal-h{margin:8px 0 4px}
-.amber{color:#e9c46a}.mut{color:var(--mut)}.tiny{font-size:11px}
+.amber{color:#e9c46a}.mut{color:var(--mut)}.shadow{color:var(--mut)}.tiny{font-size:11px}
 .conf.sm{font-size:10px;padding:1px 7px}.conf.sm2{font-size:10px;padding:2px 8px}

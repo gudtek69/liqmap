@@ -2,7 +2,7 @@
 """Live call tracker (stdlib only, sqlite). Every 5 min: compute each coin's call with liqmodel (same model + params.json
 as index.html), log a row when the call changes or hourly, resolve open calls on Hyperliquid 5m candles, write stats.json.
 Read-only: public data only, no keys, no trading."""
-import json, os, sys, time, sqlite3, shutil, traceback
+import json, os, sys, time, sqlite3, shutil, traceback, datetime
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import liqdata, liqmodel
 WEB = os.environ.get("LIQMAP_WEB", os.path.join(os.path.dirname(HERE), "web"))
@@ -24,8 +24,44 @@ NEWCOLS = [("oi_usd", "REAL"), ("oi_ts", "INTEGER"), ("funding", "REAL"), ("ls_r
            ("v2_pass", "INTEGER"), ("v2_why", "TEXT"), ("v2_target", "REAL"),
            ("v2_outcome", "TEXT"), ("v2_tth_h", "REAL"), ("v2_mae_pct", "REAL"), ("v2_r", "REAL"), ("v2_resolved_ts", "INTEGER"),
            ("prev_outcome", "TEXT"), ("prev_r", "REAL")]
+# Columns written when a call is logged. Outcome fields are filled later by grade().
+CALL_COLS = ["ts","coin","price","dir","target","then_target","dist_pct","conf","score","params_version","reason",
+             "oi_usd","oi_ts","funding","ls_ratio","ls_ts","target_size","opp_price","opp_size","atr_h","atr_ts",
+             "datr","asym","session","feat_ts","v2_pass","v2_why","v2_target","v2_outcome","prev_outcome","prev_r"]
 
 def log(*a): print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+def utc_day(ts_ms):
+    """UTC calendar day. Coin-day bootstrap groups must not follow the host timezone."""
+    return datetime.datetime.fromtimestamp(ts_ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%d")
+def previous_resolved(con, coin, now_ms):
+    """Outcome and R of the latest call for this coin that had already resolved before now_ms.
+    Hourly calls stay open for the horizon, so the immediately previous row is usually still open;
+    the last resolved one is the look-ahead-safe feature. Returns (None, None) when there isn't one."""
+    row = con.execute(
+        "SELECT outcome, r FROM calls WHERE coin=? AND outcome IS NOT NULL AND ts<? ORDER BY ts DESC LIMIT 1",
+        (coin, now_ms)).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+def recent_hits(con, now_ms, coin=None):
+    """Calls that resolved as a hit in the last 12h. Page and tracker both feed these to the hit filter."""
+    since = now_ms - liqmodel.HIT_WINDOW_MS
+    if coin is None:
+        rows = con.execute(
+            "SELECT coin, target, resolved_ts FROM calls WHERE outcome='hit' AND target IS NOT NULL AND resolved_ts>=?",
+            (since,)).fetchall()
+        return [{"coin": c, "p": p, "t": t} for c, p, t in rows]
+    rows = con.execute(
+        "SELECT target, resolved_ts FROM calls WHERE coin=? AND outcome='hit' AND target IS NOT NULL AND resolved_ts>=?",
+        (coin, since)).fetchall()
+    return [{"p": p, "t": t} for p, t in rows]
+def insert_call(con, row):
+    con.execute(f"INSERT INTO calls({','.join(CALL_COLS)}) VALUES({','.join('?' * len(CALL_COLS))})", [row.get(c) for c in CALL_COLS])
+def grade(direction, entry, cluster_target, v2_target, after, inv_mult, horizon_ms, t0, now_ms, iv_ms=300000):
+    """Resolve the shadow and the v2 target against one stop: 1.5× the original cluster distance.
+    v2_target None (suppressed) skips the v2 leg. Returns (old_or_None, v2_or_None)."""
+    stop = liqmodel.cluster_stop(direction, entry, cluster_target, inv_mult)
+    old = liqmodel.resolve(direction, entry, cluster_target, after, inv_mult, horizon_ms, t0, iv_ms, now_ms, stop=stop)
+    new = liqmodel.resolve(direction, entry, v2_target, after, inv_mult, horizon_ms, t0, iv_ms, now_ms, stop=stop) if v2_target is not None else None
+    return old, new
 def cycle():
     P = liqmodel.load_params(); con = db(); now = int(time.time() * 1000); ctx = liqdata.ctx()
     for coin in liqdata.COINS:
@@ -35,36 +71,43 @@ def cycle():
             x = ctx[coin]; spot = x["mark"]; last = oi[-1][1]
             if spot <= 0 or last <= 0: raise ValueError("non-positive price or OI")
             scale = (x["oi"] * spot + last) / last
-            M = liqmodel.model(C, oi, ls, spot, P, scale); r = liqmodel.call(C, M, x["funding"], P)
+            M = liqmodel.model(C, oi, ls, spot, P, scale)
+            # Same 12h / 0.25% hit filter as the page (filterHitPath on STATS.recent_hits).
+            M = dict(M, path=liqmodel.filter_hit_path(M["path"], recent_hits(con, now, coin), now))
+            r = liqmodel.call(C, M, x["funding"], P)
             atr, atr_ts = liqmodel.hourly_atr(C, now); v = liqmodel.call_v2(C, M, x["funding"], P, atr) if r else None
             prev = con.execute("SELECT ts,dir,target FROM calls WHERE coin=? ORDER BY ts DESC LIMIT 1", (coin,)).fetchone()
-            if r:
+            if r and v:
                 changed = not prev or prev[1] != r["dir"] or abs(prev[2] - r["target"]) / r["target"] > 0.0025
                 if changed or now - prev[0] >= H:
-                    con.execute("""INSERT INTO calls(ts,coin,price,dir,target,then_target,dist_pct,conf,score,params_version,reason,
-                        oi_usd,oi_ts,funding,ls_ratio,ls_ts,target_size,opp_price,opp_size,atr_h,atr_ts,datr,asym,session,feat_ts,v2_pass,v2_why,v2_target,v2_outcome)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                (now, coin, spot, r["dir"], r["target"], r["then"], r["pct"], r["conf"], r["score"], P["version"], "change" if changed else "hourly",
-                                 x["oi"] * spot, oi[-1][0] if oi else None, x["funding"], ls[-1][1] if ls else None, ls[-1][0] if ls else None,
-                                 v["target_size"], v["opp_price"], v["opp_size"], atr, atr_ts, v["datr"], v["asym"], liqmodel.session_tag(now), now,
-                                 int(v["pass"]), v["why"], v["target"] if v["pass"] else None, None if v["pass"] else "suppressed"))
+                    prev_outcome, prev_r = previous_resolved(con, coin, now)
+                    insert_call(con, {"ts": now, "coin": coin, "price": spot, "dir": r["dir"], "target": r["target"],
+                        "then_target": r["then"], "dist_pct": r["pct"], "conf": r["conf"], "score": r["score"],
+                        "params_version": P["version"], "reason": "change" if changed else "hourly",
+                        "oi_usd": x["oi"] * spot, "oi_ts": oi[-1][0] if oi else None, "funding": x["funding"],
+                        "ls_ratio": ls[-1][1] if ls else None, "ls_ts": ls[-1][0] if ls else None,
+                        "target_size": v["target_size"], "opp_price": v["opp_price"], "opp_size": v["opp_size"],
+                        "atr_h": atr, "atr_ts": atr_ts, "datr": v["datr"], "asym": v["asym"],
+                        "session": liqmodel.session_tag(now), "feat_ts": now,
+                        "v2_pass": int(v["pass"]), "v2_why": v["why"], "v2_target": v["target"] if v["pass"] else None,
+                        "v2_outcome": None if v["pass"] else "suppressed", "prev_outcome": prev_outcome, "prev_r": prev_r})
+                    vt = v["target"]
                     log(coin, "logged", r["dir"], round(r["target"], 6), f"{r['pct']:+.2f}%", r["conf"], "change" if changed else "hourly",
-                        "v2", "PASS" if v["pass"] else "suppressed:" + v["why"], round(v["target"], 6))
-            # resolve open calls (old method = shadow) and v2 calls; expiry only after the full horizon
+                        "v2", "PASS" if v["pass"] else "suppressed:" + v["why"],
+                        round(vt, 6) if isinstance(vt, (int, float)) and vt == vt else None)
+            # resolve open calls (old method = shadow) and v2 calls against the same cluster stop
             rows = con.execute("SELECT id,ts,price,dir,target,outcome,v2_target,v2_outcome FROM calls WHERE coin=? AND (outcome IS NULL OR (v2_target IS NOT NULL AND v2_outcome IS NULL))", (coin,)).fetchall()
             for cid, ts, px, d, tg, oc, v2t, v2o in rows:
                 after = [c for c in liqdata.candles(coin, ts, "5m") if c[0] >= ts]
                 hz = P["horizon_h"] * H
-                if oc is None:
-                    res = liqmodel.resolve(d, px, tg, after, P["invalidation_mult"], hz, ts, 300000, now)
-                    if res:
-                        con.execute("UPDATE calls SET outcome=?,tth_h=?,mae_pct=?,r=?,resolved_ts=? WHERE id=?", (res["outcome"], res["tth_h"], res["mae_pct"], res["r"], now, cid))
-                        log(coin, "resolved", cid, res["outcome"])
-                if v2t is not None and v2o is None:
-                    res = liqmodel.resolve(d, px, v2t, after, P["invalidation_mult"], hz, ts, 300000, now)
-                    if res:
-                        con.execute("UPDATE calls SET v2_outcome=?,v2_tth_h=?,v2_mae_pct=?,v2_r=?,v2_resolved_ts=? WHERE id=?", (res["outcome"], res["tth_h"], res["mae_pct"], res["r"], now, cid))
-                        log(coin, "v2 resolved", cid, res["outcome"])
+                if oc is None or (v2t is not None and v2o is None):
+                    old, new = grade(d, px, tg, v2t, after, P["invalidation_mult"], hz, ts, now)
+                    if oc is None and old:
+                        con.execute("UPDATE calls SET outcome=?,tth_h=?,mae_pct=?,r=?,resolved_ts=? WHERE id=?", (old["outcome"], old["tth_h"], old["mae_pct"], old["r"], now, cid))
+                        log(coin, "resolved", cid, old["outcome"])
+                    if v2t is not None and v2o is None and new:
+                        con.execute("UPDATE calls SET v2_outcome=?,v2_tth_h=?,v2_mae_pct=?,v2_r=?,v2_resolved_ts=? WHERE id=?", (new["outcome"], new["tth_h"], new["mae_pct"], new["r"], now, cid))
+                        log(coin, "v2 resolved", cid, new["outcome"])
                 time.sleep(0.2)
             con.commit()
         except Exception as e: log(coin, "ERROR", e)
@@ -93,8 +136,7 @@ def r_ci(rows, key_r=0, key_grp=1, B=1000, seed=7):
     bs.sort(); m = sum(x[key_r] for x in rows) / len(rows)
     return {"n": len(rows), "r_per_call": round(m, 4), "ci90": [round(bs[int(.05 * B)], 4), round(bs[int(.95 * B) - 1], 4)], "clusters": len(keys)}
 def headline(con, since_ms=0):
-    import datetime as _dt
-    day = lambda ts: _dt.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+    day = utc_day
     old = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IS NOT NULL AND ts>=?", (since_ms,))]
     v2 = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,v2_r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND ts>=?", (since_ms,))]
     old_same = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND outcome IS NOT NULL AND ts>=?", (since_ms,))]
@@ -118,9 +160,12 @@ def write_stats():
     q = "SELECT outcome,tth_h,mae_pct,r,conf FROM calls WHERE outcome IS NOT NULL"
     st["live"]["all"] = live_summary(con.execute(q).fetchall())
     st["live"]["open"] = con.execute("SELECT COUNT(*) FROM calls WHERE outcome IS NULL").fetchone()[0]
+    now_ms = st["ts"]
+    st["recent_hits"] = recent_hits(con, now_ms)
     try:
         first_v2 = con.execute("SELECT MIN(ts) FROM calls WHERE v2_pass IS NOT NULL").fetchone()[0] or 0
-        st["headline"] = headline(con, first_v2); st["headline_all_time_old_method"] = r_ci([(r, f"{c}:{ts // 86400000}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IS NOT NULL")])
+        st["headline"] = headline(con, first_v2)
+        st["headline_all_time_old_method"] = r_ci([(r, f"{c}:{utc_day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IS NOT NULL")])
     except Exception as e: st["headline"] = {"error": repr(e)}
 
     for c in liqdata.COINS:
