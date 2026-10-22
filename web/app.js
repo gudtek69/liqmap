@@ -92,6 +92,16 @@ function callCore(C,M,f){const t=M.path[0];if(!t)return null;const spot=M.spot,u
   sc+=(Math.sign(m4)===dd?K.m4_agree:K.m4_disagree)+(Math.sign(m1)===dd?K.m1_agree:K.m1_disagree);
   if(Math.abs(f)>K.funding_min)sc+=((f>0)!==up?K.funding:-K.funding);
   return {up,t,pct,dd:t.price-spot,m4,score:sc,conf:sc>K.strong?'strong':sc>K.moderate?'moderate':'weak'}}
+// v2 rules (2026-10-22, mirrors tracker/liqmodel.py call_v2): target at 80% of the cluster distance; suppress if the cluster is
+// farther than 3x hourly ATR(14) (completed candles only) or the opposite cluster is < 1.5x as far. 24h horizon unchanged.
+function hourlyAtr(C,n=14){const now=Date.now(),d=C.filter(c=>c[0]+3600e3<=now);if(d.length<n+1)return null;let s=0;
+  for(let i=d.length-n;i<d.length;i++){const b=d[i],a=d[i-1];s+=Math.max(b[2]-b[3],Math.abs(b[2]-a[4]),Math.abs(b[3]-a[4]))}return s/n}
+function callV2(C,M,cc){if(!cc)return null;const V=Object.assign({target_frac:.8,max_datr:3,min_asym:1.5},P.v2||{}),spot=M.spot,D=Math.abs(cc.t.price-spot);
+  const opp=(M.cl||[]).filter(c=>cc.up?c.price<spot:c.price>spot).sort((a,b)=>b.size/Math.sqrt(b.dist*100)-a.size/Math.sqrt(a.dist*100))[0];
+  const atr=hourlyAtr(C),datr=atr?D/atr:null,asym=opp&&D?Math.abs(opp.price-spot)/D:null,why=[];
+  if(datr===null)why.push('no ATR');else if(datr>V.max_datr)why.push(`${datr.toFixed(1)}× ATR > ${V.max_datr}`);
+  if(asym===null)why.push('no opposite cluster');else if(asym<V.min_asym)why.push(`opposite only ${asym.toFixed(2)}× as far`);
+  return {pass:!why.length,why:why.join(', '),target:spot+(cc.up?1:-1)*V.target_frac*D,datr,asym}}
 /*MODEL-END*/
 
 function draw(d,M){
@@ -149,7 +159,7 @@ function call(coin,d,M){
   const hits=st.hits;const path=P.filter(t=>!hits.some(x=>Date.now()-x.t<12*3600e3&&Math.abs(x.p-t.price)/t.price<.0025));
   const r={coin,spot,hits,path,f:d.hl.funding};
   const cc=callCore(C,{spot,path},r.f);
-  if(cc){Object.assign(r,cc);if(!fin(st.target)||Math.abs(st.target-cc.t.price)/cc.t.price>.0025){st.target=cc.t.price;st.from=spot;st.since=Date.now()}}
+  if(cc){Object.assign(r,cc);r.v2=callV2(C,{spot,cl:M.cl},cc);if(!fin(st.target)||Math.abs(st.target-cc.t.price)/cc.t.price>.0025){st.target=cc.t.price;st.from=spot;st.since=Date.now()}}
   try{localStorage.setItem(K,JSON.stringify(st))}catch(e){}
   return r;
 }
@@ -161,6 +171,7 @@ function banner(r){
     put('bc',`NOW (${r.coin}): ${up?'Model leans UP, toward shorts at':'Model leans DOWN, toward longs at'} `,h('b',null,'$'+fmtK(t.price)),` (${r.pct>0?'+':''}${r.pct.toFixed(1)}%)`,nx);
     put('bs','Next target ',h('b',null,'$'+fmtF(t.price)),' · distance ',h('b',null,`${r.dd>0?'+':'−'}$${fmtF(Math.abs(r.dd))}`),' (',h('b',null,r.pct.toFixed(2)+'%'),
       `) · cluster strength ${Math.round(t.rel*100)}% · 4h momentum ${(r.m4*100).toFixed(2)}% · funding ${(r.f*100).toFixed(4)}%/h · `,h('span',{class:'amber'},'Estimate, not financial advice'));
+    if(r.v2)put('bs',...Array.from($('bs').childNodes),h('br'),r.v2.pass?['v2 call: target ',h('b',null,'$'+fmtF(r.v2.target)),' (80% of cluster distance; old target shown above as shadow)']:['v2: ',h('b',{class:'amber'},'no call'),` — suppressed (${r.v2.why}); old-method target above is shadow only`]);
     $('bf').className='conf '+r.conf;$('bf').textContent=r.conf;}
   const x=r.hits[0];
   if(x)put('bh','Last target hit: ',h('b',null,'$'+fmtF(x.p)),h('br'),new Date(x.t).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));
