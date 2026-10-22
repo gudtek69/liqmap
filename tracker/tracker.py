@@ -42,7 +42,7 @@ def previous_resolved(con, coin, now_ms):
         (coin, now_ms)).fetchone()
     return (row[0], row[1]) if row else (None, None)
 def recent_hits(con, now_ms, coin=None):
-    """Calls that resolved as a hit in the last 12h. Page and tracker both feed these to the hit filter."""
+    """Hits in the last 12h. Private: the tracker uses them to choose a cluster. Never written to stats.json."""
     since = now_ms - liqmodel.HIT_WINDOW_MS
     if coin is None:
         rows = con.execute(
@@ -53,6 +53,43 @@ def recent_hits(con, now_ms, coin=None):
         "SELECT target, resolved_ts FROM calls WHERE coin=? AND outcome='hit' AND target IS NOT NULL AND resolved_ts>=?",
         (coin, since)).fetchall()
     return [{"p": p, "t": t} for p, t in rows]
+SELECTION_FIELDS = ("dir", "shadow", "pass", "why", "v2_target")
+def selection_row(direction, shadow, v2):
+    """Public per-coin call: the cluster the tracker already chose, its v2 target, and why it passed or not.
+    Hit prices stay out of this object."""
+    passed = bool(v2 and v2.get("pass") and liqmodel._finite(v2.get("target")) and liqmodel._finite(shadow))
+    why = v2.get("why") if v2 and isinstance(v2.get("why"), str) and v2.get("why") else ("ok" if passed else "no call")
+    return {"dir": direction if direction in ("up", "down") else None,
+            "shadow": float(shadow) if liqmodel._finite(shadow) else None, "pass": passed, "why": why[:200],
+            "v2_target": float(v2["target"]) if passed else None}
+def _selection_path():
+    return os.path.join(DATA, "selection.json")
+def load_selection():
+    """Last chosen call per coin. Sanitized down to SELECTION_FIELDS so a hand-edited file cannot add hit prices."""
+    try:
+        with open(_selection_path(), encoding="utf-8") as f: raw = json.load(f)
+    except (OSError, ValueError): return {}
+    if not isinstance(raw, dict): return {}
+    out = {}
+    for coin, row in raw.items():
+        if not isinstance(coin, str) or not isinstance(row, dict): continue
+        shadow, target, why = row.get("shadow"), row.get("v2_target"), row.get("why")
+        passed = bool(row.get("pass")) and liqmodel._finite(target) and liqmodel._finite(shadow)
+        out[coin] = {"dir": row.get("dir") if row.get("dir") in ("up", "down") else None,
+                     "shadow": float(shadow) if liqmodel._finite(shadow) else None, "pass": passed,
+                     "why": why[:200] if isinstance(why, str) and why else ("ok" if passed else "no call"),
+                     "v2_target": float(target) if passed else None}
+    return out
+def store_selection(updates):
+    if not isinstance(updates, dict): return
+    cur = load_selection()
+    for coin, row in updates.items():
+        if isinstance(coin, str) and isinstance(row, dict):
+            cur[coin] = {k: row.get(k) for k in SELECTION_FIELDS}
+    os.makedirs(DATA, exist_ok=True)
+    dest = _selection_path()
+    with open(dest + ".tmp", "w", encoding="utf-8") as f: json.dump(cur, f)
+    os.replace(dest + ".tmp", dest)
 def insert_call(con, row):
     con.execute(f"INSERT INTO calls({','.join(CALL_COLS)}) VALUES({','.join('?' * len(CALL_COLS))})", [row.get(c) for c in CALL_COLS])
 def grade(direction, entry, cluster_target, v2_target, after, inv_mult, horizon_ms, t0, now_ms, iv_ms=300000):
@@ -72,12 +109,13 @@ def cycle():
             if spot <= 0 or last <= 0: raise ValueError("non-positive price or OI")
             scale = (x["oi"] * spot + last) / last
             M = liqmodel.model(C, oi, ls, spot, P, scale)
-            # Same 12h / 0.25% hit filter as the page (filterHitPath on STATS.recent_hits).
+            # Private 12h / 0.25% hit filter. stats.json gets the chosen call, not these prices.
             M = dict(M, path=liqmodel.filter_hit_path(M["path"], recent_hits(con, now, coin), now))
             r = liqmodel.call(C, M, x["funding"], P)
             atr, atr_ts = liqmodel.hourly_atr(C, now); v = liqmodel.call_v2(C, M, x["funding"], P, atr) if r else None
             prev = con.execute("SELECT ts,dir,target FROM calls WHERE coin=? ORDER BY ts DESC LIMIT 1", (coin,)).fetchone()
             if r and v:
+                store_selection({coin: selection_row(r["dir"], r["target"], v)})
                 changed = not prev or prev[1] != r["dir"] or abs(prev[2] - r["target"]) / r["target"] > 0.0025
                 if changed or now - prev[0] >= H:
                     prev_outcome, prev_r = previous_resolved(con, coin, now)
@@ -95,6 +133,8 @@ def cycle():
                     log(coin, "logged", r["dir"], round(r["target"], 6), f"{r['pct']:+.2f}%", r["conf"], "change" if changed else "hourly",
                         "v2", "PASS" if v["pass"] else "suppressed:" + v["why"],
                         round(vt, 6) if isinstance(vt, (int, float)) and vt == vt else None)
+            else:
+                store_selection({coin: selection_row(None, None, None)})
             # resolve open calls (old method = shadow) and v2 calls against the same cluster stop
             rows = con.execute("SELECT id,ts,price,dir,target,outcome,v2_target,v2_outcome FROM calls WHERE coin=? AND (outcome IS NULL OR (v2_target IS NOT NULL AND v2_outcome IS NULL))", (coin,)).fetchall()
             for cid, ts, px, d, tg, oc, v2t, v2o in rows:
@@ -141,7 +181,7 @@ def headline(con, since_ms=0):
     v2 = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,v2_r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND ts>=?", (since_ms,))]
     old_same = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND outcome IS NOT NULL AND ts>=?", (since_ms,))]
     hr = lambda q: (lambda a: {"hit_rate": round(a[0] / a[1], 4) if a[1] else None})(con.execute(q, (since_ms,)).fetchone())
-    return {"metric": "R per call (hit=+1, miss=-invalidation_mult, expired=signed move/target dist), 90% CI by coin-day bootstrap",
+    return {"metric": "R per call (hit=+1, miss=-|stop-entry|/target distance, expired=signed move/target distance, no tape=0), 90% CI by coin-day bootstrap",
             "v2_new_method": {**r_ci(v2), **hr("SELECT SUM(v2_outcome='hit'),COUNT(*) FROM calls WHERE v2_outcome IN ('hit','miss','expired') AND ts>=?")},
             "old_method_shadow_all": {**r_ci(old), **hr("SELECT SUM(outcome='hit'),COUNT(*) FROM calls WHERE outcome IS NOT NULL AND ts>=?")},
             "old_method_on_v2_passing_calls": r_ci(old_same),
@@ -160,8 +200,8 @@ def write_stats():
     q = "SELECT outcome,tth_h,mae_pct,r,conf FROM calls WHERE outcome IS NOT NULL"
     st["live"]["all"] = live_summary(con.execute(q).fetchall())
     st["live"]["open"] = con.execute("SELECT COUNT(*) FROM calls WHERE outcome IS NULL").fetchone()[0]
-    now_ms = st["ts"]
-    st["recent_hits"] = recent_hits(con, now_ms)
+    sel = load_selection()
+    if sel: st["selection"] = sel
     try:
         first_v2 = con.execute("SELECT MIN(ts) FROM calls WHERE v2_pass IS NOT NULL").fetchone()[0] or 0
         st["headline"] = headline(con, first_v2)

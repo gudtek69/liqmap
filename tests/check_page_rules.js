@@ -14,10 +14,11 @@ class El extends Node {
 }
 class TextNode extends Node { constructor(s) { super(); this.nodeType = 3; this.data = String(s); } }
 const texts = [];
+const textPos = [];
 const g = {
   scale() {}, fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, closePath() {}, setLineDash() {},
   measureText() { return { width: 48 }; },
-  fillText(s) { texts.push(String(s)); },
+  fillText(s, x, y) { texts.push(String(s)); textPos.push({ s: String(s), y }); },
 };
 const canvas = { clientWidth: 900, clientHeight: 640, width: 0, height: 0, getContext: () => g };
 const els = { c: canvas };
@@ -76,19 +77,29 @@ const bad = JSON.parse(JSON.stringify(params)); delete bad.v2.target_frac;
 const nanP = JSON.parse(JSON.stringify(params)); nanP.v2.max_datr = NaN;
 const cluster = { price: 1100, rel: 0.8, size: 10, dist: 0.1, side: "short" };
 const base = { coin: "BTC", spot: 1000, up: true, pct: 10, dd: 100, m4: 0.01, f: 0.0001, conf: "strong", hits: [], path: [cluster, { price: 1200, rel: 0.4, size: 4, dist: 0.2, side: "short" }], t: cluster };
-function shot(rec) {
+function shot(rec, candles) {
   texts.length = 0;
+  textPos.length = 0;
   const M = { spot: 1000, path: rec.path, cl: rec.path, tot: [1], nb: 1, lo: 900, bw: 20, bwNote: 1 };
-  const d = { candles: C, hl: { funding: 0.0001, oi_btc: 1, mark: 1000 }, sources: { hyperliquid: "ok" }, ts: NOW, oiMode: "test" };
+  const d = { candles: candles || C, hl: { funding: 0.0001, oi_btc: 1, mark: 1000 }, sources: { hyperliquid: "ok" }, ts: NOW, oiMode: "test" };
   api.banner(rec); api.draw(d, M, rec); api.side(d, M, rec);
-  return { bc: text(els.bc), bs: text(els.bs), bf: els.bf.textContent, bn: els.bn.className, chart: texts.slice(), path: text(els.path) };
+  return { bc: text(els.bc), bs: text(els.bs), bf: els.bf.textContent, bn: els.bn.className, chart: texts.slice(), path: text(els.path), labels: textPos.filter(t => t.s.startsWith("target ") || t.s.startsWith("shadow ")) };
 }
 const passRec = Object.assign({}, base, { v2: { pass: true, why: "ok", target: 1080, target_frac: 0.75 } });
 const supRec = Object.assign({}, base, { v2: { pass: false, why: "no ATR", target: 1080, target_frac: 0.8 } });
 const passShot = shot(passRec);
 const supShot = shot(supRec);
-api.STATS = { recent_hits: [{ coin: "BTC", p: 1040, t: NOW - H }] };
+const near = { price: 1000.4, rel: 1, size: 10, dist: 0.0004, side: "short" };
+const wide = bars(20).map((c, i) => i === 10 ? [c[0], 1000, 8000, 100, 1000, 1] : c.slice());
+const closeRec = { coin: "BTC", spot: 1000, up: true, pct: 0.04, dd: 0.4, m4: 0, f: 0, conf: "weak", hits: [], path: [near], t: near, v2: { pass: true, why: "ok", target: 1000.2, target_frac: 0.5 } };
+const closeShot = shot(closeRec, wide);
+const labelGap = closeShot.labels.length >= 2 ? Math.abs(closeShot.labels[0].y - closeShot.labels[1].y) : null;
+api.STATS = null;
+const localCall = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
+api.STATS = { selection: { BTC: { dir: "up", shadow: 1020, pass: true, why: "ok", v2_target: 1016 } } };
 const called = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
+api.STATS = { selection: { BTC: { dir: "up", shadow: 1040, pass: false, why: "no ATR", v2_target: null } } };
+const supSel = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
 api.CALLS.BTC = passRec; api.CALLS.ETH = supRec; api.overview();
 
 const out = {
@@ -103,7 +114,10 @@ const out = {
   nan: api.callV2(bars(20, () => NaN), { spot: 1000, cl }, unf, NOW),
   flat: api.callV2(bars(20, () => 1000).map(c => (c[2] = c[3] = c[4] = 1000, c)), { spot: 1000, cl }, unf, NOW),
   asym: api.callV2(C, { spot: 1000, cl: path.concat([{ price: -Infinity, size: 80, rel: 0.5, dist: 0.04 }]) }, unf, NOW),
+  local_price: localCall.t && localCall.t.price, local_pass: !!(localCall.v2 && localCall.v2.pass),
   call_price: called.t && called.t.price, call_pass: !!(called.v2 && called.v2.pass), call_target: called.v2 && called.v2.target,
+  pub_sup_pass: !!(supSel.v2 && supSel.v2.pass), pub_sup_why: supSel.v2 && supSel.v2.why, pub_sup_shadow: supSel.t && supSel.t.price,
+  label_gap: labelGap,
   valid_ok: api.validParams(params), valid_missing: api.validParams(bad), valid_nan: api.validParams(nanP),
   banner_pass: { bc: passShot.bc, bs: passShot.bs, bf: passShot.bf, bn: passShot.bn },
   banner_sup: { bc: supShot.bc, bs: supShot.bs, bf: supShot.bf, bn: supShot.bn },

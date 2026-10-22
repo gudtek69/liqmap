@@ -104,26 +104,31 @@ def resolve(direction, entry, target, after, inv_mult, horizon_ms, t0, iv_ms=360
     through `stop`. stop defaults to inv_mult*|target-entry| from entry (backtest). Live grading passes cluster_stop so
     the shadow and the 80% target share one invalidation. Same-candle ambiguity counts as miss (conservative).
     Returns dict(outcome, tth_h, mae_pct, r) or None if unresolved and the horizon has not elapsed.
+    A miss is r = -|stop-entry|/target distance, so a stop at 1.5× the cluster and a target at 0.8× scores -1.875.
+    The default stop is inv_mult × this target's own distance, which still scores -inv_mult.
     Expire once a candle closes at/after the horizon (and now_ms, if given, is past it). If the candle series stops
     short of the horizon, expire anyway once now_ms is EXPIRE_GRACE_MS past it (t0+26h when the horizon is 24h),
-    using the last close inside the horizon."""
+    using the last close inside the horizon. If no candles arrive at all by then, expire with r=0 and flag no-data."""
     up = direction == "up"; dist = abs(target - entry)
     if not dist or not math.isfinite(dist) or not entry or not math.isfinite(entry): return None
     if stop is not None:
         if not (isinstance(stop, (int, float)) and not isinstance(stop, bool) and math.isfinite(stop)): return None
         inv = stop
     else: inv = entry - inv_mult * dist if up else entry + inv_mult * dist
+    # 2h after the horizon (26h for a 24h call). now_ms None (backtest) never takes the grace path.
+    grace = now_ms is not None and now_ms >= t0 + horizon_ms + EXPIRE_GRACE_MS
+    if not after:
+        if grace: return {"outcome": "no-data", "tth_h": None, "mae_pct": 0.0, "r": 0.0, "flag": "no-data"}
+        return None
     mae = 0.0
     for c in after:
         if c[0] >= t0 + horizon_ms: break
         adverse = (entry - c[3]) if up else (c[2] - entry); mae = max(mae, adverse)
         hit = c[2] >= target if up else c[3] <= target; bad = c[3] <= inv if up else c[2] >= inv
-        if bad: return {"outcome": "miss", "tth_h": None, "mae_pct": mae / entry * 100, "r": -inv_mult}
+        if bad: return {"outcome": "miss", "tth_h": None, "mae_pct": mae / entry * 100, "r": -abs(inv - entry) / dist}
         if hit: return {"outcome": "hit", "tth_h": (c[0] + iv_ms - t0) / 3600000, "mae_pct": mae / entry * 100, "r": 1.0}
     inside = [c for c in after if c[0] < t0 + horizon_ms]
     covered = bool(after) and after[-1][0] + iv_ms >= t0 + horizon_ms and (now_ms is None or now_ms >= t0 + horizon_ms)
-    # Series ended early: do not leave the call open forever. 2h after the horizon (26h for a 24h call).
-    grace = now_ms is not None and now_ms >= t0 + horizon_ms + EXPIRE_GRACE_MS
     if inside and (covered or grace):
         last = inside[-1][4]
         return {"outcome": "expired", "tth_h": None, "mae_pct": mae / entry * 100, "r": ((last - entry) if up else (entry - last)) / dist}

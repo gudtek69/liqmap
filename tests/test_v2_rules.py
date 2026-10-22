@@ -75,13 +75,17 @@ class SharedStop(unittest.TestCase):
         shallow = [[0, 1000, 1010, 870, 1000, 1]]
         wrong = liqmodel.resolve("up", entry, v2, shallow, 1.5, HORIZON, 0, 300000, now_ms=1000)
         self.assertEqual(wrong["outcome"], "miss")
+        # Default stop is 1.5× this target's own distance, so the backtest miss stays -1.5.
+        self.assertAlmostEqual(wrong["r"], -1.5)
         old, new = tracker.grade("up", entry, cluster, v2, shallow, 1.5, HORIZON, 0, 1000)
         self.assertIsNone(old)
         self.assertIsNone(new)
         deep = [[0, 1000, 1010, 840, 1000, 1]]
         old, new = tracker.grade("up", entry, cluster, v2, deep, 1.5, HORIZON, 0, 1000)
         self.assertEqual((old["outcome"], new["outcome"]), ("miss", "miss"))
-        self.assertEqual((old["r"], new["r"]), (-1.5, -1.5))
+        # Shared stop is 150 away. Shadow distance is 100 (r=-1.5); v2 distance is 80 (r=-1.875).
+        self.assertAlmostEqual(old["r"], -1.5)
+        self.assertAlmostEqual(new["r"], -1.875)
         touched = [[0, 1000, 1080, 900, 1050, 1]]
         old, new = tracker.grade("up", entry, cluster, v2, touched, 1.5, HORIZON, 0, 1000)
         self.assertIsNone(old)
@@ -94,6 +98,30 @@ class SharedStop(unittest.TestCase):
         self.assertIsNone(new)
         self.assertEqual(liqmodel.cluster_stop("up", 1000, 1100, 1.5), 850)
         self.assertEqual(liqmodel.cluster_stop("down", 1000, 900, 1.5), 1150)
+
+    def test_stats_headline_uses_the_wider_v2_miss(self):
+        entry, cluster, v2 = 1000.0, 1100.0, 1080.0
+        deep = [[0, 1000, 1010, 840, 1000, 1]]
+        old, new = tracker.grade("up", entry, cluster, v2, deep, 1.5, HORIZON, 0, 1000)
+        con = tracker.db()
+        ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000) + 86_400_000
+        tracker.insert_call(con, {"ts": ts, "coin": "RR", "price": entry, "dir": "up", "target": cluster,
+                                  "conf": "strong", "v2_pass": 1, "v2_why": "ok", "v2_target": v2})
+        con.execute(
+            "UPDATE calls SET outcome=?, tth_h=NULL, mae_pct=?, r=?, resolved_ts=?, v2_outcome=?, v2_tth_h=NULL, v2_mae_pct=?, v2_r=?, v2_resolved_ts=? WHERE coin='RR' AND ts=?",
+            (old["outcome"], old["mae_pct"], old["r"], ts, new["outcome"], new["mae_pct"], new["r"], ts, ts))
+        con.commit()
+        con.close()
+        tracker.write_stats()
+        with open(os.path.join(os.environ["LIQMAP_DATA"], "stats.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        v2h, oldh = st["headline"]["v2_new_method"], st["headline"]["old_method_shadow_all"]
+        self.assertAlmostEqual(v2h["r_per_call"], -1.875)
+        self.assertEqual(v2h["ci90"], [-1.875, -1.875])
+        self.assertAlmostEqual(oldh["r_per_call"], -1.5)
+        self.assertEqual(oldh["ci90"], [-1.5, -1.5])
+        self.assertIn("stop-entry", st["headline"]["metric"])
+        self.assertNotIn("recent_hits", st)
 
 
 class LateExpiry(unittest.TestCase):
@@ -122,7 +150,13 @@ class LateExpiry(unittest.TestCase):
         # A hit is not rewritten into an expiry just because the clock is past 26h.
         hit = [[0, 100, 110, 99, 110, 1]]
         self.assertEqual(liqmodel.resolve("up", 100, 110, hit, 1.5, HORIZON, 0, iv, now_ms=30 * H)["outcome"], "hit")
-        self.assertIsNone(liqmodel.resolve("up", 100, 110, [], 1.5, HORIZON, 0, iv, now_ms=30 * H))
+        # No 5m candles: stay open until the grace, then expire at r=0 flagged no-data. Backtests pass now_ms None.
+        self.assertIsNone(liqmodel.resolve("up", 100, 110, [], 1.5, HORIZON, 0, iv, now_ms=None))
+        self.assertIsNone(liqmodel.resolve("up", 100, 110, [], 1.5, HORIZON, 0, iv, now_ms=HORIZON + liqmodel.EXPIRE_GRACE_MS - 1))
+        bare = liqmodel.resolve("up", 100, 110, [], 1.5, HORIZON, 0, iv, now_ms=HORIZON + liqmodel.EXPIRE_GRACE_MS)
+        self.assertEqual(bare["outcome"], "no-data")
+        self.assertEqual(bare["flag"], "no-data")
+        self.assertEqual(bare["r"], 0)
 
 
 class HitFilterAgreement(unittest.TestCase):
@@ -165,9 +199,23 @@ class HitFilterAgreement(unittest.TestCase):
         self.assertIn("no ATR", js["flat"]["why"])
         self.assertFalse(js["asym"]["pass"])
         self.assertIn("bad data", js["asym"]["why"])
+        self.assertEqual(js["local_price"], 1040)
+        self.assertFalse(js["local_pass"])
         self.assertEqual(js["call_price"], 1020)
         self.assertTrue(js["call_pass"])
         self.assertAlmostEqual(js["call_target"], 1016)
+        self.assertFalse(js["pub_sup_pass"])
+        self.assertEqual(js["pub_sup_why"], "no ATR")
+        self.assertEqual(js["pub_sup_shadow"], 1040)
+        self.assertGreaterEqual(js["label_gap"], 18)
+        with open(os.path.join(ROOT, "web", "app.js"), encoding="utf-8") as f:
+            page = f.read()
+        self.assertNotIn("recent_hits", page)
+        self.assertNotIn("droplet", page)
+        self.assertIn("match the tracker", page)
+        with open(os.path.join(ROOT, "tracker", "tracker.py"), encoding="utf-8") as f:
+            tracker_src = f.read()
+        self.assertNotIn('st["recent_hits"]', tracker_src)
         self.assertTrue(js["valid_ok"])
         self.assertFalse(js["valid_missing"])
         self.assertFalse(js["valid_nan"])
@@ -207,17 +255,28 @@ class FeaturesAndUtc(unittest.TestCase):
         self.assertEqual(con.execute("SELECT prev_outcome, prev_r FROM calls WHERE ts=400").fetchone(), ("miss", -1.5))
         con.close()
 
-    def test_recent_hits_round_trip_into_stats(self):
+    def test_stats_publish_the_chosen_call_not_hits(self):
         con = tracker.db()
         ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000) - 1000
-        tracker.insert_call(con, {"ts": ts, "coin": "ZZ", "price": 1, "dir": "up", "target": 42})
+        tracker.insert_call(con, {"ts": ts, "coin": "ZZ", "price": 1, "dir": "up", "target": 424242.5})
         con.execute("UPDATE calls SET outcome='hit', r=1, tth_h=1, mae_pct=0, resolved_ts=? WHERE coin='ZZ' AND ts=?", (ts, ts))
         con.commit()
         con.close()
+        tracker.store_selection({"ZZ": tracker.selection_row("up", 42.0, {"pass": True, "why": "ok", "target": 33.6})})
+        tracker.store_selection({"ZZ": {"dir": "up", "shadow": 42.0, "pass": True, "why": "ok", "v2_target": 33.6, "p": 424242.5, "t": ts}})
         tracker.write_stats()
-        with open(os.path.join(os.environ["LIQMAP_DATA"], "stats.json"), encoding="utf-8") as f:
-            st = json.load(f)
-        self.assertTrue(any(h["coin"] == "ZZ" and h["p"] == 42 for h in st["recent_hits"]))
+        for folder in (os.environ["LIQMAP_DATA"], os.environ["LIQMAP_WEB"]):
+            with open(os.path.join(folder, "stats.json"), encoding="utf-8") as f:
+                raw = f.read()
+            st = json.loads(raw)
+            self.assertNotIn("recent_hits", st)
+            self.assertNotIn("424242.5", raw)
+            row = st["selection"]["ZZ"]
+            self.assertEqual(set(row), {"dir", "shadow", "pass", "why", "v2_target"})
+            self.assertEqual(row["shadow"], 42.0)
+            self.assertEqual(row["v2_target"], 33.6)
+            self.assertTrue(row["pass"])
+            self.assertEqual(row["why"], "ok")
 
     def test_utc_day_ignores_host_timezone(self):
         script = textwrap.dedent("""

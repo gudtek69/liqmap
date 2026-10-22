@@ -105,7 +105,7 @@ function callV2(C,M,cc,now){if(!cc)return null;const V=Object.assign({target_fra
   if(asym===null)add('no opposite cluster');else if(!Number.isFinite(asym))add('bad data');else if(Number.isFinite(V.min_asym)&&asym<V.min_asym)add(`opposite only ${asym.toFixed(2)}× as far`);
   const target=spot+(cc.up?1:-1)*V.target_frac*D;if(!Number.isFinite(target))add('bad data');
   return {pass:!why.length,why:why.join(', '),target,target_frac:V.target_frac,datr:Number.isFinite(datr)?datr:null,asym:Number.isFinite(asym)?asym:null}}
-// Same 12h / 0.25% rule as tracker/liqmodel.py filter_hit_path. Hits come from STATS.recent_hits (the tracker's DB).
+// Same 12h / 0.25% window as tracker/liqmodel.py filter_hit_path. The tracker applies it privately.
 function filterHitPath(path,hits,now){const WIN=12*3600e3,TOL=.0025;return (path||[]).filter(t=>{const px=t&&t.price;
   if(!(typeof px==='number'&&Number.isFinite(px)&&px>0))return false;
   return !(hits||[]).some(x=>{const p=x&&x.p,ht=x&&x.t;if(!(typeof p==='number'&&Number.isFinite(p)&&typeof ht==='number'&&Number.isFinite(ht)))return false;
@@ -145,16 +145,19 @@ function draw(d,M,rec){
   g.fillStyle='#fff';g.fillRect(W-padR,y(M.spot)-9,padR,18);g.fillStyle='#000';g.textAlign='left';g.font='bold 11px system-ui';g.fillText(fmtF(M.spot),W-padR+5,y(M.spot)+4);
   // path — the chosen cluster is the old-method target. With a v2 result it is drawn grey (shadow);
   // a passing call is the gold mark at target_frac of the way there.
-  let px=cw,py=y(M.spot);const sx=fut/(Math.max(path.length,1)+.6);
-  const mark=(x0,y0,x1,y1,col,label,dash)=>{g.strokeStyle=col;g.lineWidth=dash?1.5:2.5;g.shadowColor=dash?'transparent':col;g.shadowBlur=dash?0:8;
+  let px=cw,py=y(M.spot);const sx=fut/(Math.max(path.length,1)+.6);const placed={};
+  const mark=(x0,y0,x1,y1,col,label,dash,kind)=>{g.strokeStyle=col;g.lineWidth=dash?1.5:2.5;g.shadowColor=dash?'transparent':col;g.shadowBlur=dash?0:8;
     if(dash)g.setLineDash([5,4]);g.beginPath();g.moveTo(x0,y0);g.lineTo(x1,y1);g.stroke();g.setLineDash([]);g.shadowBlur=0;
     const a=Math.atan2(y1-y0,x1-x0);g.fillStyle=col;g.beginPath();g.moveTo(x1,y1);g.lineTo(x1-12*Math.cos(a-.4),y1-12*Math.sin(a-.4));g.lineTo(x1-12*Math.cos(a+.4),y1-12*Math.sin(a+.4));g.closePath();g.fill();
     g.setLineDash([2,3]);g.strokeStyle=col;g.globalAlpha=dash?0.55:0.45;g.lineWidth=1;g.beginPath();g.moveTo(0,y1);g.lineTo(W-padR,y1);g.stroke();g.setLineDash([]);g.globalAlpha=1;
-    g.font='bold 12px system-ui';const tw=g.measureText(label).width+12,lyy=y1+(y1<y0?-22:8);
+    g.font='bold 12px system-ui';const tw=g.measureText(label).width+12;let lyy=y1+(y1<y0?-22:8);
+    // Target and shadow boxes are 17px tall. Shift the target when the two would sit under 18px apart.
+    if(kind==='target'&&placed.shadow!=null&&Math.abs(placed.shadow-lyy)<18)lyy=placed.shadow+(lyy<placed.shadow?-18:18);
+    if(kind==='shadow'||kind==='target')placed[kind]=lyy;
     g.fillStyle='rgba(10,12,16,.9)';g.fillRect(x1-tw/2,lyy,tw,17);g.strokeStyle=col;g.strokeRect(x1-tw/2,lyy,tw,17);g.fillStyle=col;g.textAlign='center';g.fillText(label,x1,lyy+12.5)};
   path.forEach((t,i)=>{const nx=cw+sx*(i+1),ny=y(t.price),shadow=!!(view&&i===0);
-    mark(px,py,nx,ny,shadow?'#7d8798':'#ffd23f',shadow?`shadow ${fmtK(t.price)}`:`${i+1}. ${fmtK(t.price)}`,shadow);px=nx;py=ny});
-  if(view&&view.pass){const nx=cw+sx*rec.v2.target_frac,ny=y(view.price);mark(cw,y(M.spot),nx,ny,'#ffd23f',`target ${fmtK(view.price)}`,false)}
+    mark(px,py,nx,ny,shadow?'#7d8798':'#ffd23f',shadow?`shadow ${fmtK(t.price)}`:`${i+1}. ${fmtK(t.price)}`,shadow,shadow?'shadow':'');px=nx;py=ny});
+  if(view&&view.pass){const nx=cw+sx*rec.v2.target_frac,ny=y(view.price);mark(cw,y(M.spot),nx,ny,'#ffd23f',`target ${fmtK(view.price)}`,false,'target')}
   const head=view&&view.pass?`${fmtK(M.spot)} → ${fmtK(view.price)}   shadow ${fmtK(view.shadow)}   (estimate)`
     :view?`No call (suppressed: ${view.why})   shadow ${fmtK(view.shadow)}   (estimate)`
     :(path.length?fmtK(M.spot)+' → '+path.map(p=>fmtK(p.price)).join(' → '):'no clear target')+'   (estimate)';
@@ -178,21 +181,31 @@ function side(d,M,rec){
   put('src',Object.entries(d.sources).map(([k,v])=>h('tr',null,h('td',null,k),h('td',{class:String(v).startsWith('ok')?'ok':'bad'},String(v).slice(0,34)))),
     h('tr',null,h('td',null,'OI model'),h('td',{class:'small'},d.oiMode)));
 }
-function sharedHits(coin){
-  const rows=isObj(STATS)&&Array.isArray(STATS.recent_hits)?STATS.recent_hits:[];const out=[];
-  for(const x of rows){if(!x||x.coin!==coin)continue;const p=+x.p,t=+x.t;if(fin(p)&&fin(t))out.push({p,t})}
-  return out}
+function publishedSelection(coin){
+  const all=isObj(STATS)&&isObj(STATS.selection)?STATS.selection:null;
+  if(!all||!Object.prototype.hasOwnProperty.call(all,coin))return null;
+  const s=all[coin];if(!isObj(s))return {shadow:null,target:null,pass:false,why:'no call',dir:'up'};
+  const shadow=fin(+s.shadow)?+s.shadow:null,target=fin(+s.v2_target)?+s.v2_target:null,pass=!!s.pass&&shadow!=null&&target!=null;
+  const why=typeof s.why==='string'&&s.why?s.why.slice(0,200):(pass?'ok':'no call');
+  return {shadow,target:pass?target:null,pass,why,dir:s.dir==='down'?'down':'up'}}
 function call(coin,d,M){
   const raw=M.path,spot=M.spot,C=d.candles,K='liqmap_v1_'+coin;let st={};try{st=JSON.parse(localStorage.getItem(K))||{}}catch(e){}
   if(typeof st!=='object'||Array.isArray(st))st={};if(!Array.isArray(st.hits))st.hits=[];st.hits=st.hits.filter(x=>x&&fin(x.p)&&fin(x.t));
   if(fin(st.target)&&fin(st.since)&&fin(st.from)){const after=C.filter(c=>c[0]+3600e3>st.since);const up=st.target>st.from;
     if(after.some(c=>up?c[2]>=st.target:c[3]<=st.target)||(up?spot>=st.target:spot<=st.target)){st.hits=[{p:st.target,t:Date.now()},...st.hits].slice(0,5);st.target=null}}
-  // Cluster choice uses the tracker's recent hits, not this browser's localStorage, so pass/suppress match the droplet.
-  const path=filterHitPath(raw,sharedHits(coin),Date.now());
-  const r={coin,spot,hits:st.hits,path,f:d.hl.funding};
+  // Published selection (v2 target, shadow, reason) is the tracker's already-filtered call, so pass/suppress match the tracker. With no selection, use this path as-is.
+  const path=raw,r={coin,spot,hits:st.hits,path,f:d.hl.funding};
   const cc=callCore(C,{spot,path},r.f);
-  if(cc){Object.assign(r,cc);r.v2=callV2(C,{spot,cl:M.cl},cc);
-    const live=r.v2&&r.v2.pass&&fin(r.v2.target)?r.v2.target:null;
+  if(cc){Object.assign(r,cc);r.v2=callV2(C,{spot,cl:M.cl},cc)}
+  const pub=publishedSelection(coin);
+  if(pub&&fin(pub.shadow)){const up=pub.dir==='up',rel=r.t&&fin(r.t.rel)?r.t.rel:1,size=r.t&&fin(r.t.size)?r.t.size:0,dist=spot?Math.abs(pub.shadow-spot)/spot:0;
+    r.up=up;r.pct=spot?(pub.shadow-spot)/spot*100:0;r.dd=pub.shadow-spot;
+    r.t={price:pub.shadow,rel,size,dist,side:up?'short':'long'};
+    r.v2={pass:!!pub.pass,why:pub.why,target:pub.pass?pub.target:null,target_frac:fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8};
+    r.path=[{price:pub.shadow,rel,size,dist,side:r.t.side}].concat((path||[]).filter(p=>p&&p.price!==pub.shadow));
+    if(pub.pass&&fin(pub.target)&&(!fin(st.target)||Math.abs(st.target-pub.target)/pub.target>.0025)){st.target=pub.target;st.from=spot;st.since=Date.now()}}
+  else if(pub){r.t=null;r.path=[];r.v2={pass:false,why:pub.why,target:null,target_frac:fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8}}
+  else{const live=r.v2&&r.v2.pass&&fin(r.v2.target)?r.v2.target:null;
     if(live&&(!fin(st.target)||Math.abs(st.target-live)/live>.0025)){st.target=live;st.from=spot;st.since=Date.now()}}
   try{localStorage.setItem(K,JSON.stringify(st))}catch(e){}
   return r;
