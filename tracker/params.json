@@ -47,5 +47,11 @@
   "moderate": 0.5165
  },
  "invalidation_mult": 1.5,
- "horizon_h": 24
+ "horizon_h": 24,
+ "v2": {
+  "target_frac": 0.8,
+  "max_datr": 3.0,
+  "min_asym": 1.5,
+  "note": "2026-10-22: target 80% of cluster dist; suppress if dist>3x 1h ATR(14) or opposite cluster <1.5x as far; 24h expiry"
+ }
 }
