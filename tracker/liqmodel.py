@@ -137,7 +137,7 @@ def resolve(direction, entry, target, after, inv_mult, horizon_ms, t0, iv_ms=360
 # ---------------- v2 call rules (2026-10-22) ----------------
 V2_DEFAULT = {"target_frac": 0.8, "max_datr": 3.0, "min_asym": 1.5}
 EXPIRE_GRACE_MS = 2 * 3600000
-# Same window and tolerance as web/app.js filterHitPath. A hit price blocks clusters within 0.25% for 12h.
+# Private hit filter. The page does not repeat it; stats.json publishes the chosen call, not hit prices.
 HIT_WINDOW_MS = 12 * 3600000
 HIT_TOL = 0.0025
 def hourly_atr(candles, now_ms, n=14):
@@ -156,8 +156,8 @@ def opposite_cluster(M, up):
     return max(opp, key=lambda c: c["size"] / math.sqrt(c["dist"] * 100))
 def filter_hit_path(path, hits, now_ms, window_ms=HIT_WINDOW_MS, tol=HIT_TOL):
     """Drop clusters within `tol` of a hit price from the last `window_ms`.
-    hits: [{p, t}, ...] with t in ms. Keep in sync with filterHitPath in web/app.js (same window, same tolerance,
-    price in the denominator, strict < on both the age and the tolerance)."""
+    hits: [{p, t}, ...] with t in ms. Price is the denominator. Age and tolerance are strict <.
+    The page does not apply this; a visitor must not be able to reconstruct the hit list."""
     kept = []
     for t in path or []:
         px = t.get("price") if isinstance(t, dict) else None

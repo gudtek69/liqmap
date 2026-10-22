@@ -110,6 +110,12 @@ class SharedStop(unittest.TestCase):
         con.execute(
             "UPDATE calls SET outcome=?, tth_h=NULL, mae_pct=?, r=?, resolved_ts=?, v2_outcome=?, v2_tth_h=NULL, v2_mae_pct=?, v2_r=?, v2_resolved_ts=? WHERE coin='RR' AND ts=?",
             (old["outcome"], old["mae_pct"], old["r"], ts, new["outcome"], new["mae_pct"], new["r"], ts, ts))
+        nd = ts + 1
+        tracker.insert_call(con, {"ts": nd, "coin": "RR", "price": entry, "dir": "up", "target": cluster,
+                                  "conf": "strong", "v2_pass": 1, "v2_why": "ok", "v2_target": v2})
+        con.execute(
+            "UPDATE calls SET outcome=?, tth_h=NULL, mae_pct=0, r=0, resolved_ts=?, v2_outcome=?, v2_tth_h=NULL, v2_mae_pct=0, v2_r=0, v2_resolved_ts=? WHERE coin='RR' AND ts=?",
+            ("no-data", nd, "no-data", nd, nd))
         con.commit()
         con.close()
         tracker.write_stats()
@@ -118,9 +124,16 @@ class SharedStop(unittest.TestCase):
         v2h, oldh = st["headline"]["v2_new_method"], st["headline"]["old_method_shadow_all"]
         self.assertAlmostEqual(v2h["r_per_call"], -1.875)
         self.assertEqual(v2h["ci90"], [-1.875, -1.875])
+        self.assertEqual(v2h["n"], 1)
+        self.assertEqual(v2h["hit_rate"], 0)
+        self.assertEqual(v2h["no_data"], 1)
         self.assertAlmostEqual(oldh["r_per_call"], -1.5)
         self.assertEqual(oldh["ci90"], [-1.5, -1.5])
+        self.assertEqual(oldh["n"], 1)
+        self.assertEqual(oldh["no_data"], 1)
+        self.assertEqual(st["headline"]["v2_no_data"], 1)
         self.assertIn("stop-entry", st["headline"]["metric"])
+        self.assertIn("excluded from R and hit rate", st["headline"]["metric"])
         self.assertNotIn("recent_hits", st)
 
 
@@ -184,11 +197,6 @@ class HitFilterAgreement(unittest.TestCase):
         self.assertAlmostEqual(chosen["target"], 1016)
         js = json.loads(subprocess.check_output(
             ["node", os.path.join(ROOT, "tests", "check_page_rules.js"), str(NOW)], cwd=ROOT, text=True))
-        self.assertEqual(js["kept"], [1020])
-        self.assertEqual(js["tol_edge"], [1000])
-        self.assertEqual(js["tol_inside"], [])
-        self.assertEqual(js["age_edge"], [1000])
-        self.assertEqual(js["age_inside"], [])
         self.assertFalse(js["unfiltered"]["pass"])
         self.assertTrue(js["filtered"]["pass"])
         self.assertAlmostEqual(js["filtered"]["target"], chosen["target"])
@@ -201,17 +209,36 @@ class HitFilterAgreement(unittest.TestCase):
         self.assertIn("bad data", js["asym"]["why"])
         self.assertEqual(js["local_price"], 1040)
         self.assertFalse(js["local_pass"])
-        self.assertEqual(js["call_price"], 1020)
+        self.assertIn("unfiltered page estimate", js["local_text"])
+        self.assertEqual(js["call_price"], 1016)
         self.assertTrue(js["call_pass"])
         self.assertAlmostEqual(js["call_target"], 1016)
-        self.assertFalse(js["pub_sup_pass"])
-        self.assertEqual(js["pub_sup_why"], "no ATR")
-        self.assertEqual(js["pub_sup_shadow"], 1040)
+        self.assertNotIn("Shadow", js["call_text"])
+        self.assertNotIn("1.10K", js["call_text"])
+        self.assertNotIn("cluster strength", js["call_text"])
+        self.assertEqual(js["call_badge"], "—")
+        self.assertEqual(js["agree_badge"], "strong")
+        self.assertIn("cluster strength 42%", js["agree_text"])
+        self.assertIn("4h momentum 5.00%", js["agree_text"])
+        self.assertNotIn("Shadow", js["agree_text"])
+        self.assertNotIn("0.00000", js["null_text"])
+        self.assertNotIn("-100.0%", js["null_text"])
+        self.assertNotIn("Shadow", js["null_text"])
+        self.assertNotIn("0.00000", js["null_pass_text"])
+        self.assertNotIn("Shadow", js["null_pass_text"])
+        self.assertAlmostEqual(js["null_pass_target"], 1016)
+        self.assertEqual(js["stale_price"], 1040)
+        self.assertIn("tracker offline", js["stale_text"])
+        self.assertIn("unfiltered page estimate", js["stale_text"])
         self.assertGreaterEqual(js["label_gap"], 18)
         with open(os.path.join(ROOT, "web", "app.js"), encoding="utf-8") as f:
             page = f.read()
         self.assertNotIn("recent_hits", page)
         self.assertNotIn("droplet", page)
+        self.assertNotIn("function filterHitPath", page)
+        self.assertNotIn("fin(+s.shadow)", page)
+        self.assertIn("fin(s.shadow)&&s.shadow>0?s.shadow:null", page)
+        self.assertIn("fin(s.v2_target)&&s.v2_target>0?s.v2_target:null", page)
         self.assertIn("match the tracker", page)
         with open(os.path.join(ROOT, "tracker", "tracker.py"), encoding="utf-8") as f:
             tracker_src = f.read()
@@ -262,8 +289,9 @@ class FeaturesAndUtc(unittest.TestCase):
         con.execute("UPDATE calls SET outcome='hit', r=1, tth_h=1, mae_pct=0, resolved_ts=? WHERE coin='ZZ' AND ts=?", (ts, ts))
         con.commit()
         con.close()
-        tracker.store_selection({"ZZ": tracker.selection_row("up", 42.0, {"pass": True, "why": "ok", "target": 33.6})})
-        tracker.store_selection({"ZZ": {"dir": "up", "shadow": 42.0, "pass": True, "why": "ok", "v2_target": 33.6, "p": 424242.5, "t": ts}})
+        picked = tracker.selection_row("up", {"pass": True, "why": "ok", "target": 33.6}, "strong", 0.5, 0.01, ts)
+        tracker.store_selection({"ZZ": picked})
+        tracker.store_selection({"ZZ": dict(picked, shadow=42.0, p=424242.5, t=ts)})
         tracker.write_stats()
         for folder in (os.environ["LIQMAP_DATA"], os.environ["LIQMAP_WEB"]):
             with open(os.path.join(folder, "stats.json"), encoding="utf-8") as f:
@@ -271,10 +299,13 @@ class FeaturesAndUtc(unittest.TestCase):
             st = json.loads(raw)
             self.assertNotIn("recent_hits", st)
             self.assertNotIn("424242.5", raw)
+            self.assertNotIn('"shadow"', raw)
             row = st["selection"]["ZZ"]
-            self.assertEqual(set(row), {"dir", "shadow", "pass", "why", "v2_target"})
-            self.assertEqual(row["shadow"], 42.0)
+            self.assertEqual(set(row), {"ts", "dir", "pass", "why", "v2_target", "conf", "rel", "m4"})
+            self.assertNotIn("shadow", row)
             self.assertEqual(row["v2_target"], 33.6)
+            self.assertEqual(row["ts"], ts)
+            self.assertEqual(row["conf"], "strong")
             self.assertTrue(row["pass"])
             self.assertEqual(row["why"], "ok")
 

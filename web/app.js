@@ -92,7 +92,7 @@ function callCore(C,M,f){const t=M.path[0];if(!t)return null;const spot=M.spot,u
   sc+=(Math.sign(m4)===dd?K.m4_agree:K.m4_disagree)+(Math.sign(m1)===dd?K.m1_agree:K.m1_disagree);
   if(Math.abs(f)>K.funding_min)sc+=((f>0)!==up?K.funding:-K.funding);
   return {up,t,pct,dd:t.price-spot,m4,score:sc,conf:sc>K.strong?'strong':sc>K.moderate?'moderate':'weak'}}
-// v2 rules (mirrors tracker/liqmodel.py call_v2 / filter_hit_path). Target is target_frac of the cluster distance.
+// v2 rules (mirrors tracker/liqmodel.py call_v2). Target is target_frac of the cluster distance.
 // Suppress when the cluster is farther than max_datr × hourly ATR(14) (completed candles only) or the opposite
 // cluster is < min_asym × as far. Non-finite ATR → "no ATR"; non-finite asymmetry → "bad data".
 function hourlyAtr(C,n=14,now=Date.now()){const d=C.filter(c=>c[0]+3600e3<=now);if(d.length<n+1)return null;let s=0;
@@ -105,23 +105,23 @@ function callV2(C,M,cc,now){if(!cc)return null;const V=Object.assign({target_fra
   if(asym===null)add('no opposite cluster');else if(!Number.isFinite(asym))add('bad data');else if(Number.isFinite(V.min_asym)&&asym<V.min_asym)add(`opposite only ${asym.toFixed(2)}× as far`);
   const target=spot+(cc.up?1:-1)*V.target_frac*D;if(!Number.isFinite(target))add('bad data');
   return {pass:!why.length,why:why.join(', '),target,target_frac:V.target_frac,datr:Number.isFinite(datr)?datr:null,asym:Number.isFinite(asym)?asym:null}}
-// Same 12h / 0.25% window as tracker/liqmodel.py filter_hit_path. The tracker applies it privately.
-function filterHitPath(path,hits,now){const WIN=12*3600e3,TOL=.0025;return (path||[]).filter(t=>{const px=t&&t.price;
-  if(!(typeof px==='number'&&Number.isFinite(px)&&px>0))return false;
-  return !(hits||[]).some(x=>{const p=x&&x.p,ht=x&&x.t;if(!(typeof p==='number'&&Number.isFinite(p)&&typeof ht==='number'&&Number.isFinite(ht)))return false;
-    const age=now-ht;return age>=0&&age<WIN&&Math.abs(p-px)/px<TOL})})}
 /*MODEL-END*/
 
 function v2View(r){
-  const v=r&&r.v2;if(!r||!r.t||!fin(r.t.price)||!v)return null;
-  const shadow=r.t.price;
-  if(!v.pass||!fin(v.target))return {pass:false,why:v.why||'no call',shadow};
+  const v=r&&r.v2;if(!r||!v)return null;
+  // A published selection does not carry the cluster price, so there is no shadow line to draw.
+  const shadow=!r.hideShadow&&r.t&&fin(r.t.price)&&r.t.price>0?r.t.price:null;
+  if(!v.pass||!(fin(v.target)&&v.target>0)){
+    if(r.fromSelection)return {pass:false,why:v.why||'no call',shadow:null,up:!!r.up};
+    if(!shadow)return null;
+    return {pass:false,why:v.why||'no call',shadow,up:!!r.up}}
+  if(!r.fromSelection&&!shadow)return null;
   const dd=v.target-r.spot,pct=r.spot?dd/r.spot*100:0,frac=fin(v.target_frac)?Math.round(v.target_frac*100):null;
   return {pass:true,why:v.why,price:v.target,dd,pct,frac,shadow,up:!!r.up};
 }
 function draw(d,M,rec){
   const cv=$('c'),dpr=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;cv.width=W*dpr;cv.height=H*dpr;const g=cv.getContext('2d');g.scale(dpr,dpr);
-  const path=(rec&&Array.isArray(rec.path))?rec.path:M.path,view=v2View(rec);
+  const path=(rec&&rec.hideShadow)?(rec.path||[]):(rec&&Array.isArray(rec.path))?rec.path:M.path,view=v2View(rec);
   const marks=path.map(p=>p.price).filter(fin);if(view&&view.pass)marks.push(view.price);if(view&&fin(view.shadow))marks.push(view.shadow);if(!marks.length)marks.push(M.spot);
   const C=d.candles.slice(-96),padR=74,padB=26,fut=Math.round((W-padR)*.2),cw=W-padR-fut,histW=0;
   const lo=M.spot*(1-RANGE),hi=M.spot*(1+RANGE);let pmin=Math.min(...C.map(c=>c[3]),...marks),pmax=Math.max(...C.map(c=>c[2]),...marks);
@@ -155,12 +155,14 @@ function draw(d,M,rec){
     if(kind==='target'&&placed.shadow!=null&&Math.abs(placed.shadow-lyy)<18)lyy=placed.shadow+(lyy<placed.shadow?-18:18);
     if(kind==='shadow'||kind==='target')placed[kind]=lyy;
     g.fillStyle='rgba(10,12,16,.9)';g.fillRect(x1-tw/2,lyy,tw,17);g.strokeStyle=col;g.strokeRect(x1-tw/2,lyy,tw,17);g.fillStyle=col;g.textAlign='center';g.fillText(label,x1,lyy+12.5)};
-  path.forEach((t,i)=>{const nx=cw+sx*(i+1),ny=y(t.price),shadow=!!(view&&i===0);
+  path.forEach((t,i)=>{const nx=cw+sx*(i+1),ny=y(t.price),shadow=!!(view&&fin(view.shadow)&&i===0);
     mark(px,py,nx,ny,shadow?'#7d8798':'#ffd23f',shadow?`shadow ${fmtK(t.price)}`:`${i+1}. ${fmtK(t.price)}`,shadow,shadow?'shadow':'');px=nx;py=ny});
-  if(view&&view.pass){const nx=cw+sx*rec.v2.target_frac,ny=y(view.price);mark(cw,y(M.spot),nx,ny,'#ffd23f',`target ${fmtK(view.price)}`,false,'target')}
-  const head=view&&view.pass?`${fmtK(M.spot)} → ${fmtK(view.price)}   shadow ${fmtK(view.shadow)}   (estimate)`
-    :view?`No call (suppressed: ${view.why})   shadow ${fmtK(view.shadow)}   (estimate)`
-    :(path.length?fmtK(M.spot)+' → '+path.map(p=>fmtK(p.price)).join(' → '):'no clear target')+'   (estimate)';
+  if(view&&view.pass){const nx=cw+sx*(fin(rec.v2.target_frac)?rec.v2.target_frac:1),ny=y(view.price);mark(cw,y(M.spot),nx,ny,'#ffd23f',`target ${fmtK(view.price)}`,false,'target')}
+  const shadowBit=view&&fin(view.shadow)?`   shadow ${fmtK(view.shadow)}`:'';
+  const tag=(rec&&rec.offline?' · tracker offline':'')+(rec&&rec.fallback?' · unfiltered page estimate':'');
+  const head=view&&view.pass?`${fmtK(M.spot)} → ${fmtK(view.price)}${shadowBit}   (estimate)${tag}`
+    :view?`No call (suppressed: ${view.why})${shadowBit}   (estimate)${tag}`
+    :(path.length?fmtK(M.spot)+' → '+path.map(p=>fmtK(p.price)).join(' → '):'no clear target')+'   (estimate)'+tag;
   g.font='bold 13px system-ui';g.textAlign='left';g.fillStyle=view&&!view.pass?'#7d8798':'rgba(255,210,63,.95)';g.fillText(head,12,20);
   // legend
   const lx=12,ly=H-padB-22;for(let i=0;i<120;i++){const [r,gg,b]=ramp(i/119);g.fillStyle=`rgb(${r},${gg},${b})`;g.fillRect(lx+i,ly,1,8)}g.fillStyle='#8a94a6';g.font='10px system-ui';g.fillText('low    est. liquidation size    high',lx,ly-4);
@@ -169,12 +171,14 @@ function side(d,M,rec){
   $('px').textContent='$'+fmtF(M.spot);$('oi').textContent=d.hl.oi_btc!=null?fmtUsd(d.hl.oi_btc*M.spot):'n/a';
   $('fr').textContent=(d.hl.funding*100).toFixed(4)+'%';$('fr').className=d.hl.funding>=0?'ok':'bad';$('ls').textContent=d.okx_ls?d.okx_ls.at(-1)[1].toFixed(2):'n/a';
   $('up').textContent=new Date(d.ts).toLocaleTimeString();$('bw').textContent=fmtF(M.bw)+' (0.25%)';
-  const view=v2View(rec),show=(rec&&rec.path&&rec.path.length)?rec.path:M.path;
-  if(view&&view.pass)put('path',fmtK(M.spot)+' → '+fmtK(view.price),' ',h('span',{class:'shadow'},'shadow '+fmtK(view.shadow)));
-  else if(view)put('path','No call (suppressed: '+view.why+')',' ',h('span',{class:'shadow'},'shadow '+fmtK(view.shadow)));
-  else put('path',show.length?fmtK(M.spot)+' → '+show.map(p=>fmtK(p.price)).join(' → '):'No dominant cluster');
+  const view=v2View(rec),show=rec&&rec.hideShadow?(rec.path||[]):(rec&&rec.path&&rec.path.length)?rec.path:M.path;
+  const note=(rec&&rec.offline?'tracker offline':'')+(rec&&rec.offline&&rec.fallback?' · ':'')+(rec&&rec.fallback?'unfiltered page estimate':'');
+  const shadowSpan=view&&fin(view.shadow)?h('span',{class:'shadow'},'shadow '+fmtK(view.shadow)):null;
+  if(view&&view.pass)put('path',fmtK(M.spot)+' → '+fmtK(view.price),shadowSpan?' ':'',shadowSpan,note?' ':'',note?h('span',{class:'small'},note):null);
+  else if(view)put('path','No call (suppressed: '+view.why+')',shadowSpan?' ':'',shadowSpan,note?' ':'',note?h('span',{class:'small'},note):null);
+  else put('path',show.length?fmtK(M.spot)+' → '+show.map(p=>fmtK(p.price)).join(' → '):'No dominant cluster',note?' ':'',note?h('span',{class:'small'},note):null);
   put('tg',show.map((t,i)=>h('div',{class:'t'},h('div',{class:'n'},i+1),
-    h('div',null,h('b',{class:view&&i===0?'shadow':''},'$'+fmtF(t.price)),' ',h('span',{class:'small'},`${t.side==='short'?'short liqs above':'long liqs below'} · ${(t.dist*100).toFixed(1)}% away`),
+    h('div',null,h('b',{class:view&&fin(view.shadow)&&i===0?'shadow':''},'$'+fmtF(t.price)),' ',h('span',{class:'small'},`${t.side==='short'?'short liqs above':'long liqs below'} · ${(t.dist*100).toFixed(1)}% away`),
       h('div',{class:'bar'},h('i',{style:{width:Math.round(t.rel*100)+'%'}}))),
     h('div',{class:'small ar'},`${Math.round(t.rel*100)}% · ${fmtUsd(t.size)}`))));
   put('cl',M.cl.slice(0,8).sort((a,b)=>b.price-a.price).map(c=>h('tr',null,h('td',{class:c.side==='short'?'ok':'bad'},'$'+fmtF(c.price)),h('td',{class:'small'},c.side+' liqs'),h('td',null,Math.round(c.rel*100)+'%'))));
@@ -184,48 +188,82 @@ function side(d,M,rec){
 function publishedSelection(coin){
   const all=isObj(STATS)&&isObj(STATS.selection)?STATS.selection:null;
   if(!all||!Object.prototype.hasOwnProperty.call(all,coin))return null;
-  const s=all[coin];if(!isObj(s))return {shadow:null,target:null,pass:false,why:'no call',dir:'up'};
-  const shadow=fin(+s.shadow)?+s.shadow:null,target=fin(+s.v2_target)?+s.v2_target:null,pass=!!s.pass&&shadow!=null&&target!=null;
+  const s=all[coin];if(!isObj(s))return {offline:true};
+  // null must not become 0. A coin with no call has no price to print.
+  const shadow=fin(s.shadow)&&s.shadow>0?s.shadow:null;
+  const v2_target=fin(s.v2_target)&&s.v2_target>0?s.v2_target:null;
+  const ts=fin(s.ts)&&s.ts>0?s.ts:null;
+  if(ts==null||Date.now()-ts>15*60*1000)return {offline:true};
+  const pass=!!s.pass&&v2_target!=null;
   const why=typeof s.why==='string'&&s.why?s.why.slice(0,200):(pass?'ok':'no call');
-  return {shadow,target:pass?target:null,pass,why,dir:s.dir==='down'?'down':'up'}}
+  const conf=s.conf==='strong'||s.conf==='moderate'||s.conf==='weak'?s.conf:null;
+  return {offline:false,shadow,target:pass?v2_target:null,pass,why,dir:s.dir==='down'?'down':'up',conf,
+    rel:fin(s.rel)&&s.rel>=0?s.rel:null,m4:fin(s.m4)?s.m4:null,ts}}
+function sameCluster(spot,local,pub){
+  if(!local||!local.t||!fin(local.t.price)||!pub||!pub.pass||!fin(pub.target))return false;
+  if(!!local.up!==(pub.dir==='up'))return false;
+  const frac=fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8;
+  const expect=spot+(local.up?1:-1)*frac*Math.abs(local.t.price-spot);
+  return fin(expect)&&Math.abs(expect-pub.target)/pub.target<=.0025}
 function call(coin,d,M){
   const raw=M.path,spot=M.spot,C=d.candles,K='liqmap_v1_'+coin;let st={};try{st=JSON.parse(localStorage.getItem(K))||{}}catch(e){}
   if(typeof st!=='object'||Array.isArray(st))st={};if(!Array.isArray(st.hits))st.hits=[];st.hits=st.hits.filter(x=>x&&fin(x.p)&&fin(x.t));
   if(fin(st.target)&&fin(st.since)&&fin(st.from)){const after=C.filter(c=>c[0]+3600e3>st.since);const up=st.target>st.from;
     if(after.some(c=>up?c[2]>=st.target:c[3]<=st.target)||(up?spot>=st.target:spot<=st.target)){st.hits=[{p:st.target,t:Date.now()},...st.hits].slice(0,5);st.target=null}}
-  // Published selection (v2 target, shadow, reason) is the tracker's already-filtered call, so pass/suppress match the tracker. With no selection, use this path as-is.
-  const path=raw,r={coin,spot,hits:st.hits,path,f:d.hl.funding};
+  // A fresh selection is the tracker's call, so pass/suppress match the tracker. Missing or older than 15 min: unfiltered page estimate.
+  const path=raw,r={coin,spot,hits:st.hits,path,f:d.hl.funding,fromSelection:false,hideShadow:false,offline:false,fallback:false,agree:false};
   const cc=callCore(C,{spot,path},r.f);
   if(cc){Object.assign(r,cc);r.v2=callV2(C,{spot,cl:M.cl},cc)}
-  const pub=publishedSelection(coin);
-  if(pub&&fin(pub.shadow)){const up=pub.dir==='up',rel=r.t&&fin(r.t.rel)?r.t.rel:1,size=r.t&&fin(r.t.size)?r.t.size:0,dist=spot?Math.abs(pub.shadow-spot)/spot:0;
-    r.up=up;r.pct=spot?(pub.shadow-spot)/spot*100:0;r.dd=pub.shadow-spot;
-    r.t={price:pub.shadow,rel,size,dist,side:up?'short':'long'};
-    r.v2={pass:!!pub.pass,why:pub.why,target:pub.pass?pub.target:null,target_frac:fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8};
-    r.path=[{price:pub.shadow,rel,size,dist,side:r.t.side}].concat((path||[]).filter(p=>p&&p.price!==pub.shadow));
-    if(pub.pass&&fin(pub.target)&&(!fin(st.target)||Math.abs(st.target-pub.target)/pub.target>.0025)){st.target=pub.target;st.from=spot;st.since=Date.now()}}
-  else if(pub){r.t=null;r.path=[];r.v2={pass:false,why:pub.why,target:null,target_frac:fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8}}
-  else{const live=r.v2&&r.v2.pass&&fin(r.v2.target)?r.v2.target:null;
-    if(live&&(!fin(st.target)||Math.abs(st.target-live)/live>.0025)){st.target=live;st.from=spot;st.since=Date.now()}}
+  const local={up:!!r.up,t:r.t,path:(r.path||[]).slice(),conf:r.conf,m4:r.m4};
+  const pub=publishedSelection(coin),frac=fin(P.v2&&P.v2.target_frac)?P.v2.target_frac:.8;
+  const track=px=>{if(fin(px)&&(!fin(st.target)||Math.abs(st.target-px)/px>.0025)){st.target=px;st.from=spot;st.since=Date.now()}};
+  if(pub&&pub.offline){r.offline=true;r.fallback=true;
+    const live=r.v2&&r.v2.pass&&fin(r.v2.target)?r.v2.target:null;if(live)track(live)}
+  else if(pub){r.fromSelection=true;r.hideShadow=true;r.up=pub.dir==='up';r.agree=sameCluster(spot,local,pub);
+    if(pub.pass&&pub.target){const dist=spot?Math.abs(pub.target-spot)/spot:0;
+      r.t={price:pub.target,rel:r.agree&&pub.rel!=null?pub.rel:0,size:0,dist,side:r.up?'short':'long'};
+      r.pct=spot?(pub.target-spot)/spot*100:0;r.dd=pub.target-spot;
+      r.v2={pass:true,why:pub.why,target:pub.target,target_frac:frac};
+      r.path=[{price:pub.target,rel:r.t.rel,size:0,dist,side:r.t.side}];
+      if(r.agree&&local.path[1])r.path.push(local.path[1]);
+      r.conf=r.agree?pub.conf:null;r.m4=r.agree&&fin(pub.m4)?pub.m4:null;track(pub.target)}
+    else{r.t=null;r.path=[];r.v2={pass:false,why:pub.why,target:null,target_frac:frac};r.conf=null;r.m4=null;r.agree=false}}
+  else{r.fallback=true;const live=r.v2&&r.v2.pass&&fin(r.v2.target)?r.v2.target:null;if(live)track(live)}
   try{localStorage.setItem(K,JSON.stringify(st))}catch(e){}
   return r;
 }
 function banner(r){
-  const bn=$('bn'),t=r.t,path=r.path,view=v2View(r);
-  if(!t){bn.className='banner';$('ba').textContent='↔';$('bc').textContent=`NOW (${r.coin}): No dominant liquidation cluster — chop / wait`;$('bs').textContent='Estimate, not financial advice.';$('bf').className='conf weak';$('bf').textContent='weak'}
+  const bn=$('bn'),t=r.t,path=r.path||[],view=v2View(r);
+  const bits=[];if(r.offline)bits.push('tracker offline');if(r.fallback)bits.push('unfiltered page estimate');
+  const note=bits.length?h('span',{class:'small'},bits.join(' · ')):null;
+  const confOk=r.conf==='strong'||r.conf==='moderate'||r.conf==='weak';
+  const showDetail=!r.fromSelection||r.agree;
+  if(r.fromSelection&&view&&!view.pass){bn.className='banner';$('ba').textContent='↔';
+    put('bc',`NOW (${r.coin}): No call (suppressed: ${view.why})`);
+    put('bs',h('span',{class:'amber'},'Estimate, not financial advice'),note?' · ':null,note);
+    $('bf').className='conf weak';$('bf').textContent='no call'}
+  else if(!t){bn.className='banner';$('ba').textContent='↔';$('bc').textContent=`NOW (${r.coin}): No dominant liquidation cluster — chop / wait`;
+    put('bs',h('span',{class:'amber'},'Estimate, not financial advice'),note?' · ':null,note);
+    $('bf').className='conf weak';$('bf').textContent='weak'}
   else if(!view||!view.pass){const why=(view&&view.why)||'no call';
     bn.className='banner';$('ba').textContent='↔';
     put('bc',`NOW (${r.coin}): No call (suppressed: ${why})`);
-    put('bs',h('span',{class:'shadow'},`Shadow (old target) $${fmtF(t.price)}`),` (${r.pct>0?'+':''}${r.pct.toFixed(1)}%) · `,h('span',{class:'amber'},'Estimate, not financial advice'));
+    put('bs',view&&fin(view.shadow)?h('span',{class:'shadow'},`Shadow (old target) $${fmtF(view.shadow)}`):null,view&&fin(view.shadow)?` (${r.pct>0?'+':''}${r.pct.toFixed(1)}%) · `:null,h('span',{class:'amber'},'Estimate, not financial advice'),note?' · ':null,note);
     $('bf').className='conf weak';$('bf').textContent='no call';}
   else{const up=view.up,px=view.price,dd=view.dd,pct=view.pct;
-    const nx=path[1]?[`, then ${path[1].price>px?'UP':'DOWN'} to `,h('b',{class:path[1].price>px?'ok':'bad'},'$'+fmtK(path[1].price))]:[];
+    const nx=showDetail&&path[1]?[`, then ${path[1].price>px?'UP':'DOWN'} to `,h('b',{class:path[1].price>px?'ok':'bad'},'$'+fmtK(path[1].price))]:[];
     bn.className='banner '+(up?'up':'dn');$('ba').textContent=up?'▲':'▼';
     put('bc',`NOW (${r.coin}): ${up?'Model leans UP, toward shorts at':'Model leans DOWN, toward longs at'} `,h('b',null,'$'+fmtK(px)),` (${pct>0?'+':''}${pct.toFixed(1)}%)`,nx);
-    put('bs','Next target ',h('b',null,'$'+fmtF(px)),' · distance ',h('b',null,`${dd>0?'+':'−'}$${fmtF(Math.abs(dd))}`),' (',h('b',null,pct.toFixed(2)+'%'),
-      `) · ${view.frac}% of cluster distance · cluster strength ${Math.round(t.rel*100)}% · 4h momentum ${(r.m4*100).toFixed(2)}% · funding ${(r.f*100).toFixed(4)}%/h · `,h('span',{class:'amber'},'Estimate, not financial advice'),
-      h('br'),h('span',{class:'shadow'},`Shadow (old target) $${fmtF(view.shadow)}`));
-    $('bf').className='conf '+r.conf;$('bf').textContent=r.conf;}
+    const detail=[];
+    if(view.frac!=null)detail.push(` · ${view.frac}% of cluster distance`);
+    if(showDetail&&t&&fin(t.rel))detail.push(` · cluster strength ${Math.round(t.rel*100)}%`);
+    if(showDetail&&fin(r.m4))detail.push(` · 4h momentum ${(r.m4*100).toFixed(2)}%`);
+    put('bs','Next target ',h('b',null,'$'+fmtF(px)),' · distance ',h('b',null,`${dd>0?'+':'−'}$${fmtF(Math.abs(dd))}`),' (',h('b',null,pct.toFixed(2)+'%'),')',
+      detail,` · funding ${(r.f*100).toFixed(4)}%/h · `,h('span',{class:'amber'},'Estimate, not financial advice'),
+      fin(view.shadow)?h('br'):null,fin(view.shadow)?h('span',{class:'shadow'},`Shadow (old target) $${fmtF(view.shadow)}`):null,
+      note?h('br'):null,note);
+    if(confOk){$('bf').className='conf '+r.conf;$('bf').textContent=r.conf}
+    else{$('bf').className='conf weak';$('bf').textContent='—'}}
   const x=r.hits[0];
   if(x)put('bh','Last target hit: ',h('b',null,'$'+fmtF(x.p)),h('br'),new Date(x.t).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}));
   else put('bh','No target hit yet',h('br'),h('span',{class:'tiny'},'tracked in this browser'));
@@ -255,11 +293,20 @@ function overview(){
   const head=h('tr',null,['Coin','Price','Move','Next target','Distance','Then','Confidence','Last hit'].map(x=>h('th',null,x)),
     h('th',{title:'Backtest: hit target before 1.5x adverse move within 24h'},'Backtest hit (n)'),h('th',null,'Live hit (n)'));
   put('ovt',head,COINS.map(c=>{const r=CALLS[c];if(!r)return h('tr',{class:'r',data:{c}},h('td',null,h('b',null,c)),h('td',{colspan:9,class:'small'},'no data'));
-    const view=v2View(r);
-    const mid=!r.t?[h('td',{colspan:5,class:'small'},'no dominant cluster')]
-      :(!view||!view.pass)?[h('td',{class:'small'},'No call (suppressed: '+(view?view.why:'no call')+')'),h('td',{class:'shadow'},'$'+fmtF(r.t.price)),h('td',{class:'shadow'},`${r.pct>0?'+':''}${r.pct.toFixed(2)}%`),h('td',{class:'small shadow'},'shadow'),h('td',null,h('span',{class:'conf sm2 weak'},'no call'))]
-      :[h('td',{class:view.up?'u':'d'},h('b',null,view.up?'▲ leans UP · shorts':'▼ leans DOWN · longs')),h('td',null,'$'+fmtF(view.price),h('div',{class:'small shadow'},'shadow $'+fmtF(view.shadow))),h('td',{class:view.up?'u':'d'},`${view.pct>0?'+':''}${view.pct.toFixed(2)}%`),
-        h('td',{class:'small'},r.path[1]?'→ $'+fmtK(r.path[1].price):'—'),h('td',null,h('span',{class:'conf sm2 '+r.conf},r.conf))];
+    const view=v2View(r),confOk=r.conf==='strong'||r.conf==='moderate'||r.conf==='weak';
+    const showThen=(!r.fromSelection||r.agree)&&r.path&&r.path[1];
+    const tag=(r.offline?'tracker offline':'')+(r.offline&&r.fallback?' · ':'')+(r.fallback?'unfiltered page estimate':'');
+    const mid=view&&!view.pass?[h('td',{class:'small'},'No call (suppressed: '+view.why+(tag?' · '+tag:'')+')'),
+        fin(view.shadow)?h('td',{class:'shadow'},'$'+fmtF(view.shadow)):h('td',{class:'small'},'—'),
+        fin(view.shadow)?h('td',{class:'shadow'},`${r.pct>0?'+':''}${r.pct.toFixed(2)}%`):h('td',{class:'small'},'—'),
+        fin(view.shadow)?h('td',{class:'small shadow'},'shadow'):h('td',{class:'small'},tag||'—'),
+        h('td',null,h('span',{class:'conf sm2 weak'},'no call'))]
+      :view&&view.pass?[h('td',{class:view.up?'u':'d'},h('b',null,view.up?'▲ leans UP · shorts':'▼ leans DOWN · longs')),
+        h('td',null,'$'+fmtF(view.price),fin(view.shadow)?h('div',{class:'small shadow'},'shadow $'+fmtF(view.shadow)):(tag?h('div',{class:'small'},tag):null)),
+        h('td',{class:view.up?'u':'d'},`${view.pct>0?'+':''}${view.pct.toFixed(2)}%`),
+        h('td',{class:'small'},showThen?'→ $'+fmtK(r.path[1].price):'—'),
+        h('td',null,confOk?h('span',{class:'conf sm2 '+r.conf},r.conf):h('span',{class:'small'},'—'))]
+      :[h('td',{colspan:5,class:'small'},(tag?tag+' — ':'')+'no dominant cluster')];
     return h('tr',{class:'r'+(c===COIN?' on':''),data:{c}},h('td',null,h('b',null,c)),h('td',null,'$'+fmtF(r.spot)),mid,
       h('td',{class:'small'},r.hits[0]?'$'+fmtF(r.hits[0].p)+' '+new Date(r.hits[0].t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'—'),statCells(c))}));
 }

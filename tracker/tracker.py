@@ -53,15 +53,24 @@ def recent_hits(con, now_ms, coin=None):
         "SELECT target, resolved_ts FROM calls WHERE coin=? AND outcome='hit' AND target IS NOT NULL AND resolved_ts>=?",
         (coin, since)).fetchall()
     return [{"p": p, "t": t} for p, t in rows]
-SELECTION_FIELDS = ("dir", "shadow", "pass", "why", "v2_target")
-def selection_row(direction, shadow, v2):
-    """Public per-coin call: the cluster the tracker already chose, its v2 target, and why it passed or not.
-    Hit prices stay out of this object."""
-    passed = bool(v2 and v2.get("pass") and liqmodel._finite(v2.get("target")) and liqmodel._finite(shadow))
+# Public call. No cluster/shadow price: a visitor could compare that with the page's own cluster and infer a hit.
+SELECTION_FIELDS = ("ts", "dir", "pass", "why", "v2_target", "conf", "rel", "m4")
+SELECTION_MAX_AGE_MS = 15 * 60 * 1000
+def _sel_num(x, positive=False):
+    if not liqmodel._finite(x): return None
+    if positive and x <= 0: return None
+    return float(x)
+def selection_row(direction, v2, conf, rel, m4, ts):
+    """Chosen call for stats.json: v2 target, reason, and the badge inputs. The cluster price stays private."""
+    target = v2.get("target") if isinstance(v2, dict) else None
+    passed = bool(v2 and v2.get("pass") and _sel_num(target, positive=True) is not None)
     why = v2.get("why") if v2 and isinstance(v2.get("why"), str) and v2.get("why") else ("ok" if passed else "no call")
-    return {"dir": direction if direction in ("up", "down") else None,
-            "shadow": float(shadow) if liqmodel._finite(shadow) else None, "pass": passed, "why": why[:200],
-            "v2_target": float(v2["target"]) if passed else None}
+    return {"ts": int(ts) if liqmodel._finite(ts) else None,
+            "dir": direction if direction in ("up", "down") else None, "pass": passed, "why": why[:200],
+            "v2_target": float(target) if passed else None,
+            "conf": conf if conf in ("strong", "moderate", "weak") else None,
+            "rel": _sel_num(rel) if _sel_num(rel) is not None and rel >= 0 else None,
+            "m4": _sel_num(m4)}
 def _selection_path():
     return os.path.join(DATA, "selection.json")
 def load_selection():
@@ -73,12 +82,15 @@ def load_selection():
     out = {}
     for coin, row in raw.items():
         if not isinstance(coin, str) or not isinstance(row, dict): continue
-        shadow, target, why = row.get("shadow"), row.get("v2_target"), row.get("why")
-        passed = bool(row.get("pass")) and liqmodel._finite(target) and liqmodel._finite(shadow)
-        out[coin] = {"dir": row.get("dir") if row.get("dir") in ("up", "down") else None,
-                     "shadow": float(shadow) if liqmodel._finite(shadow) else None, "pass": passed,
+        target, why, rel, m4 = row.get("v2_target"), row.get("why"), row.get("rel"), row.get("m4")
+        passed = bool(row.get("pass")) and _sel_num(target, positive=True) is not None
+        out[coin] = {"ts": int(row["ts"]) if liqmodel._finite(row.get("ts")) else None,
+                     "dir": row.get("dir") if row.get("dir") in ("up", "down") else None, "pass": passed,
                      "why": why[:200] if isinstance(why, str) and why else ("ok" if passed else "no call"),
-                     "v2_target": float(target) if passed else None}
+                     "v2_target": float(target) if passed else None,
+                     "conf": row.get("conf") if row.get("conf") in ("strong", "moderate", "weak") else None,
+                     "rel": float(rel) if _sel_num(rel) is not None and rel >= 0 else None,
+                     "m4": _sel_num(m4)}
     return out
 def store_selection(updates):
     if not isinstance(updates, dict): return
@@ -115,7 +127,7 @@ def cycle():
             atr, atr_ts = liqmodel.hourly_atr(C, now); v = liqmodel.call_v2(C, M, x["funding"], P, atr) if r else None
             prev = con.execute("SELECT ts,dir,target FROM calls WHERE coin=? ORDER BY ts DESC LIMIT 1", (coin,)).fetchone()
             if r and v:
-                store_selection({coin: selection_row(r["dir"], r["target"], v)})
+                store_selection({coin: selection_row(r["dir"], v, r["conf"], r["rel"], r["m4"], now)})
                 changed = not prev or prev[1] != r["dir"] or abs(prev[2] - r["target"]) / r["target"] > 0.0025
                 if changed or now - prev[0] >= H:
                     prev_outcome, prev_r = previous_resolved(con, coin, now)
@@ -134,7 +146,7 @@ def cycle():
                         "v2", "PASS" if v["pass"] else "suppressed:" + v["why"],
                         round(vt, 6) if isinstance(vt, (int, float)) and vt == vt else None)
             else:
-                store_selection({coin: selection_row(None, None, None)})
+                store_selection({coin: selection_row(None, None, None, None, None, now)})
             # resolve open calls (old method = shadow) and v2 calls against the same cluster stop
             rows = con.execute("SELECT id,ts,price,dir,target,outcome,v2_target,v2_outcome FROM calls WHERE coin=? AND (outcome IS NULL OR (v2_target IS NOT NULL AND v2_outcome IS NULL))", (coin,)).fetchall()
             for cid, ts, px, d, tg, oc, v2t, v2o in rows:
@@ -154,10 +166,13 @@ def cycle():
         time.sleep(0.5)
     con.close(); write_stats()
 def live_summary(rows):
+    """Hit rate and expectancy use hit/miss/expired only. no-data (r=0, no tape) is counted beside them."""
+    nodata = sum(1 for r in rows if r[0] == "no-data")
+    rows = [r for r in rows if r[0] in ("hit", "miss", "expired")]
     n = len(rows)
-    if not n: return {"n": 0}
+    if not n: return {"n": 0, "no_data": nodata}
     hits = [r for r in rows if r[0] == "hit"]
-    s = {"n": n, "hit_rate": len(hits) / n, "expectancy_r": sum(r[3] for r in rows) / n,
+    s = {"n": n, "no_data": nodata, "hit_rate": len(hits) / n, "expectancy_r": sum(r[3] for r in rows) / n,
          "avg_tth_h": sum(r[1] for r in hits) / len(hits) if hits else None, "avg_mae_pct": sum(r[2] for r in rows) / n}
     s["by_conf"] = {k: {"n": len(g), "hit_rate": sum(r[0] == "hit" for r in g) / len(g) if g else None} for k in ("strong", "moderate", "weak") for g in [[r for r in rows if r[4] == k]]}
     return s
@@ -176,17 +191,22 @@ def r_ci(rows, key_r=0, key_grp=1, B=1000, seed=7):
     bs.sort(); m = sum(x[key_r] for x in rows) / len(rows)
     return {"n": len(rows), "r_per_call": round(m, 4), "ci90": [round(bs[int(.05 * B)], 4), round(bs[int(.95 * B) - 1], 4)], "clusters": len(keys)}
 def headline(con, since_ms=0):
+    """R and hit rate share one population: hit, miss, expired. no-data (r=0, no tape) is counted beside that, not inside it."""
     day = utc_day
-    old = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IS NOT NULL AND ts>=?", (since_ms,))]
-    v2 = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,v2_r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND ts>=?", (since_ms,))]
-    old_same = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE v2_outcome IS NOT NULL AND v2_outcome!='suppressed' AND outcome IS NOT NULL AND ts>=?", (since_ms,))]
-    hr = lambda q: (lambda a: {"hit_rate": round(a[0] / a[1], 4) if a[1] else None})(con.execute(q, (since_ms,)).fetchone())
-    return {"metric": "R per call (hit=+1, miss=-|stop-entry|/target distance, expired=signed move/target distance, no tape=0), 90% CI by coin-day bootstrap",
-            "v2_new_method": {**r_ci(v2), **hr("SELECT SUM(v2_outcome='hit'),COUNT(*) FROM calls WHERE v2_outcome IN ('hit','miss','expired') AND ts>=?")},
-            "old_method_shadow_all": {**r_ci(old), **hr("SELECT SUM(outcome='hit'),COUNT(*) FROM calls WHERE outcome IS NOT NULL AND ts>=?")},
+    old = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IN ('hit','miss','expired') AND ts>=?", (since_ms,))]
+    v2 = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,v2_r FROM calls WHERE v2_outcome IN ('hit','miss','expired') AND ts>=?", (since_ms,))]
+    old_same = [(r, f"{c}:{day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE v2_outcome IN ('hit','miss','expired') AND outcome IN ('hit','miss','expired') AND ts>=?", (since_ms,))]
+    def hr(col):
+        a = con.execute(f"SELECT SUM({col}='hit'),COUNT(*) FROM calls WHERE {col} IN ('hit','miss','expired') AND ts>=?", (since_ms,)).fetchone()
+        return {"hit_rate": round(a[0] / a[1], 4) if a[1] else None, "n": a[1]}
+    def nodata(col):
+        return con.execute(f"SELECT COUNT(*) FROM calls WHERE {col}='no-data' AND ts>=?", (since_ms,)).fetchone()[0]
+    return {"metric": "R per call (hit=+1, miss=-|stop-entry|/target distance, expired=signed move/target distance). no-data is excluded from R and hit rate and counted separately. 90% CI by coin-day bootstrap",
+            "v2_new_method": {**r_ci(v2), **hr("v2_outcome"), "no_data": nodata("v2_outcome")},
+            "old_method_shadow_all": {**r_ci(old), **hr("outcome"), "no_data": nodata("outcome")},
             "old_method_on_v2_passing_calls": r_ci(old_same),
             "v2_suppressed": con.execute("SELECT COUNT(*) FROM calls WHERE v2_outcome='suppressed' AND ts>=?", (since_ms,)).fetchone()[0],
-            "v2_since": since_ms}
+            "v2_no_data": nodata("v2_outcome"), "old_no_data": nodata("outcome"), "v2_since": since_ms}
 def write_stats():
     P = liqmodel.load_params(); con = db()
     bt = None
@@ -205,7 +225,7 @@ def write_stats():
     try:
         first_v2 = con.execute("SELECT MIN(ts) FROM calls WHERE v2_pass IS NOT NULL").fetchone()[0] or 0
         st["headline"] = headline(con, first_v2)
-        st["headline_all_time_old_method"] = r_ci([(r, f"{c}:{utc_day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IS NOT NULL")])
+        st["headline_all_time_old_method"] = r_ci([(r, f"{c}:{utc_day(ts)}") for ts, c, r in con.execute("SELECT ts,coin,r FROM calls WHERE outcome IN ('hit','miss','expired')")])
     except Exception as e: st["headline"] = {"error": repr(e)}
 
     for c in liqdata.COINS:

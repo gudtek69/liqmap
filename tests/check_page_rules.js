@@ -46,7 +46,7 @@ const api = new Function([
   cut(src, "const fin=", "async function loadSide"),
   cut(src, "let P=", "/*MODEL-END*/"),
   cut(src, "function v2View", "document.addEventListener"),
-  "return {validParams,hourlyAtr,callV2,filterHitPath,call,banner,draw,side,overview,CALLS,get STATS(){return STATS},set STATS(v){STATS=v},get P(){return P},set P(v){P=v}};",
+  "return {validParams,hourlyAtr,callV2,call,banner,draw,side,overview,CALLS,get STATS(){return STATS},set STATS(v){STATS=v},get P(){return P},set P(v){P=v}};",
 ].join("\n"))();
 
 const H = 3600e3;
@@ -62,15 +62,13 @@ const path = [
 ];
 const opp = { price: 960, size: 80, rel: 0.7, dist: 0.04, side: "long" };
 const cl = path.concat([opp]);
-const hits = [{ p: 1040, t: NOW - H }];
 function prices(xs) { return xs.map(c => c.price); }
 const ccOf = pth => {
-  // callCore is inside the function scope; expose it by calling call() instead for the integrated path.
   const body = cut(src, "function callCore", "function hourlyAtr");
   const fn = new Function("P", "C", "path", body + "\nreturn callCore(C,{spot:1000,path},0);");
   return fn(api.P, C, pth);
 };
-const kept = api.filterHitPath(path, hits, NOW);
+const kept = [path[1]];
 const unf = ccOf(path), fil = ccOf(kept);
 const params = JSON.parse(fs.readFileSync(nodePath.join(__dirname, "../tracker/params.json"), "utf8"));
 const bad = JSON.parse(JSON.stringify(params)); delete bad.v2.target_frac;
@@ -94,29 +92,46 @@ const wide = bars(20).map((c, i) => i === 10 ? [c[0], 1000, 8000, 100, 1000, 1] 
 const closeRec = { coin: "BTC", spot: 1000, up: true, pct: 0.04, dd: 0.4, m4: 0, f: 0, conf: "weak", hits: [], path: [near], t: near, v2: { pass: true, why: "ok", target: 1000.2, target_frac: 0.5 } };
 const closeShot = shot(closeRec, wide);
 const labelGap = closeShot.labels.length >= 2 ? Math.abs(closeShot.labels[0].y - closeShot.labels[1].y) : null;
+const mkt = { candles: C, hl: { funding: 0 } };
+const book = { spot: 1000, path, cl };
 api.STATS = null;
-const localCall = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
-api.STATS = { selection: { BTC: { dir: "up", shadow: 1020, pass: true, why: "ok", v2_target: 1016 } } };
-const called = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
-api.STATS = { selection: { BTC: { dir: "up", shadow: 1040, pass: false, why: "no ATR", v2_target: null } } };
-const supSel = api.call("BTC", { candles: C, hl: { funding: 0 } }, { spot: 1000, path, cl });
+const localCall = api.call("BTC", mkt, book);
+const localShot = shot(localCall);
+const fresh = { dir: "up", pass: true, why: "ok", conf: "strong", rel: 0.42, m4: 0.05, ts: NOW };
+api.STATS = { selection: { BTC: Object.assign({ v2_target: 1016, shadow: 1100 }, fresh) } };
+const called = api.call("BTC", mkt, book);
+const calledShot = shot(called);
+api.STATS = { selection: { BTC: Object.assign({ v2_target: 1032 }, fresh) } };
+const agreed = api.call("BTC", mkt, book);
+const agreedShot = shot(agreed);
+api.STATS = { selection: { BTC: { dir: "up", shadow: null, pass: true, why: "ok", v2_target: null, conf: "strong", rel: 0.42, m4: 0.05, ts: NOW } } };
+const nullShadow = api.call("BTC", mkt, book);
+const nullShot = shot(nullShadow);
+api.STATS = { selection: { BTC: { dir: "up", shadow: null, pass: true, why: "ok", v2_target: 1016, ts: NOW } } };
+const nullShadowPass = api.call("BTC", mkt, book);
+const nullPassShot = shot(nullShadowPass);
+api.STATS = { selection: { BTC: Object.assign({ v2_target: 1016 }, fresh, { ts: NOW - 16 * 60 * 1000 }) } };
+const stale = api.call("BTC", mkt, book);
+const staleShot = shot(stale);
 api.CALLS.BTC = passRec; api.CALLS.ETH = supRec; api.overview();
 
 const out = {
   atr: api.hourlyAtr(C, 14, NOW),
-  kept: prices(kept),
-  tol_edge: prices(api.filterHitPath([{ price: 1000 }], [{ p: 1002.5, t: NOW - 1 }], NOW)),
-  tol_inside: prices(api.filterHitPath([{ price: 1000 }], [{ p: 1002.4, t: NOW - 1 }], NOW)),
-  age_edge: prices(api.filterHitPath([{ price: 1000 }], [{ p: 1000, t: NOW - 12 * H }], NOW)),
-  age_inside: prices(api.filterHitPath([{ price: 1000 }], [{ p: 1000, t: NOW - 12 * H + 1 }], NOW)),
   unfiltered: api.callV2(C, { spot: 1000, cl }, unf, NOW),
   filtered: api.callV2(C, { spot: 1000, cl }, fil, NOW),
   nan: api.callV2(bars(20, () => NaN), { spot: 1000, cl }, unf, NOW),
   flat: api.callV2(bars(20, () => 1000).map(c => (c[2] = c[3] = c[4] = 1000, c)), { spot: 1000, cl }, unf, NOW),
   asym: api.callV2(C, { spot: 1000, cl: path.concat([{ price: -Infinity, size: 80, rel: 0.5, dist: 0.04 }]) }, unf, NOW),
   local_price: localCall.t && localCall.t.price, local_pass: !!(localCall.v2 && localCall.v2.pass),
+  local_text: localShot.bc + localShot.bs + localShot.path,
   call_price: called.t && called.t.price, call_pass: !!(called.v2 && called.v2.pass), call_target: called.v2 && called.v2.target,
-  pub_sup_pass: !!(supSel.v2 && supSel.v2.pass), pub_sup_why: supSel.v2 && supSel.v2.why, pub_sup_shadow: supSel.t && supSel.t.price,
+  call_text: calledShot.bc + calledShot.bs + calledShot.path + calledShot.chart.join("\n"),
+  call_badge: calledShot.bf,
+  agree_badge: agreedShot.bf, agree_text: agreedShot.bs + agreedShot.bc,
+  null_text: nullShot.bc + nullShot.bs + nullShot.path + nullShot.chart.join("\n"),
+  null_pass_text: nullPassShot.bc + nullPassShot.bs + nullPassShot.path + nullPassShot.chart.join("\n"),
+  null_pass_target: nullShadowPass.v2 && nullShadowPass.v2.target,
+  stale_price: stale.t && stale.t.price, stale_text: staleShot.bc + staleShot.bs + staleShot.path,
   label_gap: labelGap,
   valid_ok: api.validParams(params), valid_missing: api.validParams(bad), valid_nan: api.validParams(nanP),
   banner_pass: { bc: passShot.bc, bs: passShot.bs, bf: passShot.bf, bn: passShot.bn },
